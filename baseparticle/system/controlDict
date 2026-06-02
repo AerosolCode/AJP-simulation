@@ -1,0 +1,65 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  9
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+application     simpleFoam;
+
+startFrom       startTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+endTime         0.1;
+
+deltaT          1e-4;
+
+writeControl    timeStep;
+
+writeInterval   10;
+
+writeAtEnd      yes;
+
+writeFormat     binary;
+
+/*fileHandler     collated;*/
+
+writePrecision  6;
+
+writeCompression on;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable true;
+
+functions
+{
+    /*
+    particleTracks
+     {
+         type                particleTracks;
+         libs                ("liblagrangianFunctionObjects.so");
+         cloud               kinematicCloud;      // kinematicCloudProperties の cloud 名と一致
+         writeControl        timeStep;            // 各ステップ出力（最終点拾うため）
+         writeInterval   10000;                   // 1 ステップごと
+         trackUnsteadyState  yes;
+         format              vtk;                 // ASCII VTK（パース容易）
+     }
+     */
+}
+
+// ************************************************************************* //
