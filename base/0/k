@@ -17,7 +17,7 @@ FoamFile
 
 dimensions      [0 2 -2 0 0 0 0];
 
-internalField   uniform 1e-10;
+internalField   uniform 1e-100;
 
 boundaryField
 {
@@ -37,8 +37,9 @@ boundaryField
 
     outlet
     {
-        type            inletOutlet;
-        inletValue	    uniform 1e-5;
+        //type            inletOutlet;
+        type            zeroGradient;
+        //inletValue	    uniform 1e-5;
     	value		    $internalField;
     }
 
@@ -47,7 +48,7 @@ boundaryField
     //        type            kLowReWallFunction;
         type kqRWallFunction; 
         //type            fixedValue;
-        value           uniform 1e-10;
+        value           uniform 1e-100;
     }
 
     "(front|back)"

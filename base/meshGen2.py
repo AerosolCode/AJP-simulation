@@ -55,7 +55,7 @@ l2y              = float(p["l2y_mm"])   * 1e-3
 
 # ===== derived / aliases (match your variable names) =====
 t2 = L3 * math.cos(theta2)
-R4 = R + 1e-3
+R4 = R + 10e-3
 R5 = 50e-3
 t1 = t + L0
 
@@ -84,7 +84,6 @@ pts[9] = occ.addPoint(R1,   t + L0 + L1 + L2,           0.0, 1.0)
 pts[10] = occ.addPoint(R1,   t + L0 + L1,                0.0, 1.0)
 pts[11] = occ.addPoint(R,    t + L0,                     0.0, 1.0)
 pts[12] = occ.addPoint(R,    t,                          0.0, 1.0)
-
 pts[13] = occ.addPoint(R4,   t,                         0.0, 1.0)
 pts[14] = occ.addPoint(R4,   t1,                        0.0, 1.0)
 pts[15] = occ.addPoint(R5,   t1,                        0.0, 1.0)

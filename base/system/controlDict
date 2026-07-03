@@ -28,11 +28,12 @@ deltaT          1;
 
 writeControl    timeStep;
 
-writeInterval   1000;
+writeInterval   500;
 
-purgeWrite      0;
+purgeWrite      2;
 
-writeFormat     ascii;
+writeFormat     binary;
+//writeFormat     ascii;
 
 writePrecision  6;
 

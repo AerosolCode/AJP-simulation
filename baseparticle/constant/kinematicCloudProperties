@@ -27,7 +27,7 @@ solution
     //treatment of source terms
     interpolationSchemes    {
         rho             cell;
-        U               cellPoint;
+        U               cell;
         mu              cell;
 		/*Available schemes are: cell, cellPatchConstrained, cellPoint
 		  cellPointFace, cellPointWallModified, pointMVC                     */
@@ -147,14 +147,67 @@ subModels
     }
 
 
-    dispersionModel stochasticDispersionRAS;//none;
+    dispersionModel none; //stochasticDispersionRAS;
 
     patchInteractionModel standardWallInteraction;
 
     standardWallInteractionCoeffs
     {
-        type        stick;//stick;    // stick, escape, rebound
+        type       stick;     // stick, escape, rebound
     }
+
+    /*patchInteractionModel localInteraction;
+
+    localInteractionCoeffs
+    {
+        patches
+        (
+            wallSubstrate
+            {
+                type stick;
+            }
+
+            wallUpper
+            {
+                type rebound;
+            }
+
+            wallDown
+            {
+                type rebound;
+            }
+
+            wallCavity
+            {
+                type rebound;
+            }
+
+            front
+            {
+                type escape;
+            }
+
+            back
+            {
+                type escape;
+            }
+
+            inletAerosol
+            {
+                type escape;
+            }
+
+            inletSheath
+            {
+                type escape;
+            }
+
+            outlet
+            {
+                type escape;
+            }
+        );
+    }*/
 
     surfaceFilmModel none;
 

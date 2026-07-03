@@ -24,7 +24,7 @@ Qsheath = convert(Qsheath_Lmin)
 Qaerosol = convert(Qaerosol_Lmin)
 
 header = '''
-/*--------------------------------*- C++ -*----------------------------------*\
+/*--------------------------------*- C++ -*----------------------------------*
 | =========                 |                                                 |
 | \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
 |  \\    /   O peration     | Version:  2406                                  |

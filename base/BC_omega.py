@@ -19,7 +19,7 @@ Rin = float(p["Rin_mm"])
 t = float(p["l2y_mm"]) - float(p["l1y_mm"])
 
 header = '''
-/*--------------------------------*- C++ -*----------------------------------*\
+/*--------------------------------*- C++ -*----------------------------------*
   =========                 |
   \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
    \\    /   O peration     | Website:  https://openfoam.org
@@ -36,7 +36,7 @@ FoamFile
 
 dimensions      [0 0 -1 0 0 0 0];
 
-internalField   uniform 1e-10;
+internalField   uniform 1e-100;
 
 boundaryField
 {
@@ -45,8 +45,9 @@ boundaryField
 footer = '''
     outlet
     {
-        type                inletOutlet;
-        inletValue	        uniform 1e-10;
+        //type                inletOutlet;
+        type            zeroGradient;
+        //inletValue	        uniform 1e-10;
     	value		        $internalField;
     }
     "wall.*"
@@ -69,14 +70,14 @@ with open("0/omega", "w") as f:
     f.write(f"    inletSheath\n")
     f.write("    {\n")
     f.write(f"        type                turbulentMixingLengthDissipationRateInlet;\n")
-    f.write(f"        mixingLength        {t * 1e-3};\n")
+    f.write(f"        mixingLength        {0.07 * t * 1e-3};\n")
     f.write(f"        value               $internalField;\n")
     f.write("    }\n\n")
 
     f.write(f"    inletAerosol\n")
     f.write("    {\n")
     f.write(f"        type                turbulentMixingLengthDissipationRateInlet;\n")
-    f.write(f"        mixingLength        {Rin * 1e-3};\n")
+    f.write(f"        mixingLength        {0.07 * Rin * 1e-3};\n")
     f.write(f"        value               $internalField;\n")
     f.write("    }\n\n")
 
