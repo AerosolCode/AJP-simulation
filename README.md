@@ -17,16 +17,18 @@
 
 ## 1. 計算を始める前に
 
-利用するPythonでNumPy・Gmshと [requirements-mobo.txt](requirements-mobo.txt) の依存パッケージを使えるようにし、OpenFOAM・Slurm・MPI・互換性のある粒子solverを準備してください。環境設定ファイルの作成や読み込みは不要です。ジョブは投入元の環境を引き継ぐので、計算ノードでも同じPATH・ライブラリ・作業ディレクトリを利用できる状態にします。
+利用するPythonでNumPy・Gmshと [requirements-mobo.txt](requirements-mobo.txt) の依存パッケージを使えるようにし、OpenFOAM・Slurm・MPI・`aerosolDynamicsFoam` を準備してください。環境設定ファイルの作成や読み込みは不要です。ジョブは投入元の環境を引き継ぐので、計算ノードでも同じPATH・ライブラリ・作業ディレクトリを利用できる状態にします。
 
-粒子solver本体は同梱していません。有限半径のさえぎりライブラリは残しているため、使用するsolverと同じOpenFOAM環境で、別途build済みのsolverソースを指定して作成します。
+粒子計算には、[別リポジトリで管理する aerosolDynamicsFoam](https://github.com/AerosolCode/aerosolDynamicsFoam) を使います。本リポジトリにはsolver本体を重複して同梱しません。有限半径のさえぎりライブラリは本リポジトリに置き、使用する `aerosolDynamicsFoam` と同じOpenFOAM環境で、別途clone・buildしたsolverソースを指定して作成します。
+
+本手順の対応solverは [`66e8009`](https://github.com/AerosolCode/aerosolDynamicsFoam/commit/66e8009bbc423ff2076bb8bd3110a58affa56142) です。wedge反射処理と粒子追跡の停滞対策を含むこの版を利用し、solverとさえぎりライブラリを同じソースに対してbuildしてください。
 
 ```bash
 # /absolute/path/to/aerosolDynamicsFoam は手元のsolverソースの絶対パスへ置換
 bash baseparticle/build_custom.sh /absolute/path/to/aerosolDynamicsFoam
 ```
 
-外部solverには、`liboneWayIntermediate` と必要なヘッダを備え、`-particleParallel`・`-nParticleShards` とwedge反射に対応した改修版が必要であり、標準solverへそのまま置き換えることはできません。生成した `baseparticle/custom/finiteRadiusDeposition/lib/libfiniteRadiusDeposition.so` は粒子ケースへコピーされます。
+使用する `aerosolDynamicsFoam` は、`liboneWayIntermediate` と必要なヘッダを備え、`-particleParallel`・`-nParticleShards` とwedge反射に対応した版を使ってください。生成した `baseparticle/custom/finiteRadiusDeposition/lib/libfiniteRadiusDeposition.so` は粒子ケースへコピーされます。
 
 共有する計算条件は [bo_config.json](bo_config.json) の形状範囲・目的関数・制約・乱数seedで指定します。CFDと粒子計算のSlurm資源指定は、それぞれ `base/run.sh` と `baseparticle/loopaerosolDynamics.sh` の `#SBATCH` 行を確認してください。条件やテンプレートは初期生成前に確認し、途中で評価条件を変えないでください。
 

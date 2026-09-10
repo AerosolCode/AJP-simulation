@@ -40,7 +40,12 @@ NumPy・Gmsh、および\code{requirements-mobo.txt}のBO依存関係が利用�
 clone直下から操作する。実行スクリプトは準備済みの環境とPATHを利用し、環境設定ファイルを
 自動で読み込まない。Slurmが選ぶnodeでも同じ実行環境とcaseディレクトリが利用できることを前提とする。
 
-粒子solverは外部に導入した互換\code{aerosolDynamicsFoam}を使う。
+粒子solverは、別リポジトリ
+\url{https://github.com/AerosolCode/aerosolDynamicsFoam}
+で管理する\code{aerosolDynamicsFoam}を引き続き利用し、本リポジトリには重複同梱しない。
+対応solver commitは
+\href{https://github.com/AerosolCode/aerosolDynamicsFoam/commit/66e8009bbc423ff2076bb8bd3110a58affa56142}{\code{66e8009}}
+であり、従来のwedge反射と追跡停滞の検出は、このcommitへ移管済みである。
 
 外部solverには、解析的位置追跡、\code{-particleParallel}と\code{-nParticleShards}の
 オプション、wedgeでの反射処理を備えた従来手法と互換の改修版が必要であり、
@@ -222,6 +227,12 @@ objective versionを観測に対応させて保管する。
 修正後\code{potentialFoam}の正常終了を確認した。有限半径についてはOpenFOAM v2406での
 build/loadと、serialでの強制1000接触イベントの記録・除去を確認した。
 これらは分岐前に行った検証の記録であり、本版によるクラスタ上の新たな本番計算の実績ではない。
+
+今回のsolver移管確認では、OpenFOAM v2406で\code{liboneWayIntermediate}、
+\code{aerosolDynamicsFoam}本体、\code{finiteRadiusDeposition}の実buildが成功した。
+solverの依存ライブラリをロードしたプロセスで、有限半径pluginのロード成功も確認した。
+solver側の静的回帰テスト5件とAJP側の回帰テスト39件はすべて成功した。
+今回、実CFD・粒子物理の検証計算およびSlurmへの計算投入は行っていない。
 
 本版のソース回帰テストは次で実行する。
 \begin{verbatim}
