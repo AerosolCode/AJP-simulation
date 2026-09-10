@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Production structured/swept mesh generator for all AJP CFD cases.
 
-The former unstructured generator is archived at
-``archive/mesh/meshGen2_unstructured.py`` and is not used by case generation.
+The former unstructured generator is retained in the archive on branch
+``feature/structured-finite-radius-mobo-v2``.
 """
 
 from __future__ import annotations

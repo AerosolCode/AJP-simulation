@@ -6,9 +6,19 @@
 #SBATCH --time=04:00:00
 
 set -e
+finish_cfd()
+{
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        rm -f CFD_DONE
+        touch CFD_FAILED
+    fi
+}
+trap finish_cfd EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 echo "[run] script start"
-WORKER_ROOT=${AJP_WORKER_ROOT:-"$HOME/AJP-worker"}
-WORKER_ENV=${AJP_WORKER_ENV:-"$WORKER_ROOT/worker-env.sh"}
+WORKER_ENV=${AJP_WORKER_ENV-}
 if [ -r "$WORKER_ENV" ]; then
     # Host-specific OpenFOAM and Python/Gmsh locations.
     source "$WORKER_ENV"
@@ -153,7 +163,6 @@ if ! tail -n 50 log.potentialFoam | grep -q '^End'; then
 fi
 
 CASE_NAME=$(basename "$PWD")
-scontrol update JobId=$SLURM_JOB_ID JobName=$CASE_NAME
 touch "${CASE_NAME}.foam"
 
 echo "Running simpleFoam for $CASE_NAME"
@@ -179,46 +188,5 @@ if ! check_cfd_velocity_field; then
 fi
 
 touch CFD_DONE
-
-#PID=$!
-
-#tail -f log.simpleFoam &
-#AILPID=$!
-#
-#LAST_TIME_LINE=""
-#LAST_CHANGE=$(date +%s)
-
-#while kill -0 $PID 2>/dev/null
-#do
-#
-#    CURRENT_TIME_LINE=$(grep "^Time =" log.simpleFoam | tail -n 1)
-#
-#   if [ "$CURRENT_TIME_LINE" != "$LAST_TIME_LINE" ]; then
-#
-#       LAST_TIME_LINE="$CURRENT_TIME_LINE"
-#       LAST_CHANGE=$(date +%s)
-#
-#       echo "Advanced to: $CURRENT_TIME_LINE"
-#
-#   else
-#
-#      NOW=$(date +%s)
-#       DT=$((NOW - LAST_CHANGE))
-#
-#        echo "No timestep progress for $DT sec"
-#
-#        if [ $DT -gt 60 ]; then
-#
-#            echo "$CASE_NAME : STEP TOO SLOW -> killing"
-#
-#            kill -9 $PID
-#            break
-#        fi
-#    fi
-#
-#    sleep 5
-#done
-
-#kill $TAILPID 2>/dev/null
 
 echo "$CASE_NAME finished"

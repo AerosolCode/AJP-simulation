@@ -8,12 +8,16 @@ baseparticle/custom/finiteRadiusDeposition/lib/*.so
 
 # Generated report/LaTeX intermediates
 reports/_build/
+reports/*.aux
+reports/*.log
+reports/*.out
+reports/*.toc
+reports/*.fls
+reports/*.fdb_latexmk
 
 # Generated validation and campaign data (keep only documentation in Git)
-test_cases/*
-!test_cases/README.md
-archive/test_cases_*/*
-!archive/test_cases_*/README_ARCHIVE.md
+test_cases/
+archive/
 campaigns/
 
 # Per-user cluster paths and login name

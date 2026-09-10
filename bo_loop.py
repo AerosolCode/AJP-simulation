@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Bayesian optimization loop driver for the AJP simulation pipeline.
+"""Manual Bayesian optimization commands for the AJP simulation pipeline.
 
-The script intentionally depends only on Python's standard library and numpy so
-it can run on the xeon login node without pandas/scipy/sklearn.
+Each invocation performs one user-selected stage. Initial candidate generation
+needs numpy; model-based multi-objective proposals also require BoTorch/PyTorch.
 """
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -14,16 +15,17 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from baseparticle.cfd_fields import latest_cfd_time
+from tools.site_config import load_site_env
 
 
 DEFAULT_CONFIG = {
-    "workdir": ".",
+    "workdir": "campaigns/manual_structured_finite_radius",
     "template_root": ".",
     "base_template": "base",
     "particle_template": "baseparticle",
@@ -113,7 +115,6 @@ DEFAULT_CONFIG = {
         "sbatch": "sbatch",
         "squeue": "squeue",
         "user": "",
-        "particle_job_prefix": "P_",
     },
 }
 
@@ -137,7 +138,7 @@ def deep_merge(base, override):
 def load_config(path):
     config = deepcopy(DEFAULT_CONFIG)
     config_path = Path(path).expanduser() if path else None
-    if config_path and config_path.exists():
+    if config_path:
         with config_path.open() as f:
             loaded = json.load(f)
         config = deep_merge(config, loaded)
@@ -988,7 +989,7 @@ def collect_completed(config, workdir, include_partial=False, cases=None):
     candidates = read_csv_rows(candidates_path(workdir))
     observations = read_csv_rows(observations_path(workdir))
     observed_cases = {row.get("case") for row in observations}
-    wanted = set(cases) if cases else None
+    wanted = validate_cases(candidates, cases)
     new_rows = []
 
     for candidate in candidates:
@@ -1056,45 +1057,33 @@ def collect_completed(config, workdir, include_partial=False, cases=None):
     return new_rows
 
 
-def queued_jobs(config):
+def queued_jobs(config, strict=False):
     slurm = config.get("slurm", {})
     squeue = slurm.get("squeue", "squeue")
     user = slurm.get("user") or os.environ.get("USER") or ""
-    cmd = [squeue, "-h", "-o", "%j"]
+    cmd = [squeue, "-h", "-o", "%.200j"]
     if user:
         cmd[1:1] = ["-u", user]
     try:
-        result = subprocess.run(cmd, check=False, text=True, capture_output=True)
-    except FileNotFoundError:
+        result = subprocess.run(cmd, check=False, text=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        if strict:
+            raise RuntimeError("squeue unavailable; no jobs submitted") from error
+        print("squeue unavailable; queued state is unknown", file=sys.stderr)
         return set()
     if result.returncode != 0:
+        if strict:
+            raise RuntimeError("squeue failed; no jobs submitted: " + result.stderr.strip())
+        print("squeue failed; queued state is unknown", file=sys.stderr)
         return set()
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
-def latest_numeric_time(case_dir):
-    latest = None
-    latest_value = None
-    for child in Path(case_dir).iterdir():
-        if not child.is_dir():
-            continue
-        try:
-            value = float(child.name)
-        except ValueError:
-            continue
-        if latest_value is None or value > latest_value:
-            latest = child.name
-            latest_value = value
-    return latest
-
-
 def cfd_completed(case_dir):
     case_dir = Path(case_dir)
-    if not (case_dir / "CFD_DONE").exists():
-        return False
-
-    latest = latest_numeric_time(case_dir)
-    if latest is None or not (case_dir / latest / "U").exists():
+    try:
+        latest_cfd_time(case_dir)
+    except (ValueError, OSError):
         return False
 
     for log_name in ("log.simpleFoam", "log.simpleFoam.restart"):
@@ -1114,10 +1103,26 @@ def cfd_completed(case_dir):
     return False
 
 
+def job_name(config, workdir, case, particle=False):
+    # Names identify both clone/campaign and stage when both branches share Slurm.
+    identity = str(Path(workdir).resolve()).encode()
+    tag = hashlib.sha256(identity).hexdigest()[:10]
+    return "M_%s_%s_%s" % (tag, "P" if particle else "C", case)
+
+
+def validate_cases(candidates, cases):
+    wanted = set(cases) if cases is not None else None
+    if wanted is not None:
+        unknown = wanted - {row.get("case") for row in candidates}
+        if unknown:
+            raise ValueError("unknown cases: " + ", ".join(sorted(unknown)))
+    return wanted
+
+
 def run_sbatch(case_dir, job_name, script, config, dry_run=False):
     sbatch = config.get("slurm", {}).get("sbatch", "sbatch")
-    cmd = [sbatch, "--job-name", job_name, script]
-    nodelist = config.get("slurm", {}).get("nodelist")
+    cmd = [sbatch, "--export=ALL", "--job-name", job_name, script]
+    nodelist = os.environ.get("AJP_SLURM_NODELIST", config.get("slurm", {}).get("nodelist"))
     if nodelist:
         cmd[1:1] = ["--nodelist", nodelist]
     if dry_run:
@@ -1127,16 +1132,15 @@ def run_sbatch(case_dir, job_name, script, config, dry_run=False):
     if result.returncode == 0:
         print(result.stdout.strip())
         return True
-    print(result.stderr.strip() or result.stdout.strip(), file=sys.stderr)
-    return False
+    raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "sbatch failed")
 
 
 def submit_cfd(config, workdir, cases=None, dry_run=False):
     candidates = read_csv_rows(candidates_path(workdir))
     observations = read_csv_rows(observations_path(workdir))
     observed = {row.get("case") for row in observations}
-    wanted = set(cases) if cases else None
-    jobs = queued_jobs(config)
+    wanted = validate_cases(candidates, cases)
+    jobs = queued_jobs(config, strict=not dry_run)
     submitted = 0
     skipped = 0
 
@@ -1151,10 +1155,15 @@ def submit_cfd(config, workdir, cases=None, dry_run=False):
         if not case_dir.exists():
             skipped += 1
             continue
+        if (case_dir / "CFD_FAILED").exists():
+            print("skip failed CFD (inspect before retry):", case)
+            skipped += 1
+            continue
         if cfd_completed(case_dir):
             skipped += 1
             continue
-        if case in jobs:
+        name = job_name(config, workdir, case)
+        if name in jobs or job_name(config, workdir, case, particle=True) in jobs:
             skipped += 1
             continue
 
@@ -1162,7 +1171,7 @@ def submit_cfd(config, workdir, cases=None, dry_run=False):
         if not (case_dir / script).exists():
             skipped += 1
             continue
-        if run_sbatch(case_dir, case, script, config, dry_run=dry_run):
+        if run_sbatch(case_dir, name, script, config, dry_run=dry_run):
             submitted += 1
     print("submit-cfd: submitted=%d skipped=%d" % (submitted, skipped))
     return submitted
@@ -1181,9 +1190,8 @@ def submit_particles(config, workdir, particle_template, cases=None, dry_run=Fal
     candidates = read_csv_rows(candidates_path(workdir))
     observations = read_csv_rows(observations_path(workdir))
     observed = {row.get("case") for row in observations}
-    wanted = set(cases) if cases else None
-    jobs = queued_jobs(config)
-    prefix = config.get("slurm", {}).get("particle_job_prefix", "P_")
+    wanted = validate_cases(candidates, cases)
+    jobs = queued_jobs(config, strict=not dry_run)
     particle_script = particle_script_name(config)
     submitted = 0
     skipped = 0
@@ -1203,26 +1211,36 @@ def submit_particles(config, workdir, particle_template, cases=None, dry_run=Fal
         if (particle_dir / "PARTICLE_DONE").exists():
             skipped += 1
             continue
-        job_name = prefix + case
-        if job_name in jobs:
+        if (particle_dir / "PARTICLE_FAILED").exists():
+            print("skip failed particles (inspect before retry):", case)
+            skipped += 1
+            continue
+        name = job_name(config, workdir, case, particle=True)
+        if name in jobs or job_name(config, workdir, case) in jobs:
             skipped += 1
             continue
         if dry_run:
             if not particle_dir.exists():
                 print("dry-run: would copy", particle_template, "to", particle_dir)
         else:
+            library = Path(particle_template) / "custom/finiteRadiusDeposition/lib/libfiniteRadiusDeposition.so"
+            if not library.is_file():
+                raise RuntimeError("build finiteRadiusDeposition before particle submission: " + str(library))
             particle_dir = ensure_particle_case(case_dir, particle_template, particle_script)
         if not (particle_dir / particle_script).exists() and not dry_run:
             skipped += 1
             continue
-        if run_sbatch(particle_dir, job_name, particle_script, config, dry_run=dry_run):
+        if run_sbatch(particle_dir, name, particle_script, config, dry_run=dry_run):
             submitted += 1
     print("submit-particles: submitted=%d skipped=%d" % (submitted, skipped))
     return submitted
 
 
-def suggest(config, workdir, base_template, batch_size, submit=False, dry_run=False):
-    workdir.mkdir(parents=True, exist_ok=True)
+def suggest(config, workdir, base_template, batch_size, dry_run=False):
+    if batch_size <= 0:
+        raise ValueError("batch size must be positive")
+    if not dry_run:
+        workdir.mkdir(parents=True, exist_ok=True)
     candidates = read_csv_rows(candidates_path(workdir))
     observations = read_csv_rows(observations_path(workdir))
     existing = existing_units_from_rows(candidates, config)
@@ -1279,16 +1297,7 @@ def suggest(config, workdir, base_template, batch_size, submit=False, dry_run=Fa
 
     append_csv_rows(candidates_path(workdir), rows, candidate_fieldnames(config))
     print("suggest: prepared %d cases with method=%s" % (len(rows), method))
-    if submit and rows:
-        submit_cfd(config, workdir, cases=[row["case"] for row in rows], dry_run=dry_run)
     return rows
-
-
-def pending_count(config, workdir):
-    candidates = read_csv_rows(candidates_path(workdir))
-    observations = read_csv_rows(observations_path(workdir))
-    observed = {row.get("case") for row in observations}
-    return sum(1 for row in candidates if row.get("case") not in observed)
 
 
 def print_status(config, workdir):
@@ -1296,7 +1305,6 @@ def print_status(config, workdir):
     observations = read_csv_rows(observations_path(workdir))
     observed = {row.get("case") for row in observations}
     jobs = queued_jobs(config)
-    prefix = config.get("slurm", {}).get("particle_job_prefix", "P_")
     counts = {
         "completed": 0,
         "ready_collect": 0,
@@ -1306,6 +1314,8 @@ def print_status(config, workdir):
         "cfd_queued": 0,
         "prepared": 0,
         "missing": 0,
+        "cfd_failed": 0,
+        "particle_failed": 0,
     }
     for row in candidates:
         case = row.get("case")
@@ -1313,16 +1323,20 @@ def print_status(config, workdir):
         particle_dir = case_dir / "baseparticle"
         if case in observed:
             counts["completed"] += 1
+        elif (case_dir / "CFD_FAILED").exists():
+            counts["cfd_failed"] += 1
+        elif (particle_dir / "PARTICLE_FAILED").exists():
+            counts["particle_failed"] += 1
         elif (particle_dir / "PARTICLE_DONE").exists() and (particle_dir / "particle_fates_all.csv").exists():
             counts["ready_collect"] += 1
-        elif prefix + case in jobs:
+        elif job_name(config, workdir, case, particle=True) in jobs:
             counts["particle_queued"] += 1
         elif cfd_completed(case_dir):
             if particle_dir.exists():
                 counts["particle_ready"] += 1
             else:
                 counts["cfd_done"] += 1
-        elif case in jobs:
+        elif job_name(config, workdir, case) in jobs:
             counts["cfd_queued"] += 1
         elif case_dir.exists():
             counts["prepared"] += 1
@@ -1341,139 +1355,72 @@ def print_status(config, workdir):
 
 def init_workdir(config, config_dir, workdir):
     workdir.mkdir(parents=True, exist_ok=True)
-    with (workdir / "bo_config_snapshot.json").open("w") as f:
+    snapshot = workdir / "bo_config_snapshot.json"
+    if snapshot.exists() or candidates_path(workdir).exists():
+        raise ValueError("campaign already initialized; use suggest or a new --workdir")
+    with snapshot.open("x") as f:
         json.dump(config, f, indent=2)
     print("initialized", workdir)
 
 
-def step(config, workdir, base_template, particle_template, batch_size, max_pending, submit, dry_run):
-    collect_completed(config, workdir)
-    if submit:
-        submit_particles(config, workdir, particle_template, dry_run=dry_run)
-        submit_cfd(config, workdir, dry_run=dry_run)
-    candidates = read_csv_rows(candidates_path(workdir))
-    observations = read_csv_rows(observations_path(workdir))
-    gp_min_points = int(config.get("bo", {}).get("gp_min_points", 0))
-    if len(observations) < gp_min_points and len(candidates) >= gp_min_points:
-        print(
-            "step: initial design target prepared "
-            "(candidates=%d observations=%d target=%d)"
-            % (len(candidates), len(observations), gp_min_points)
-        )
-        return []
-    remaining = max_pending - pending_count(config, workdir)
-    if remaining <= 0:
-        print("step: pending limit reached")
-        return []
-    return suggest(
-        config,
-        workdir,
-        base_template,
-        min(batch_size, remaining),
-        submit=submit,
-        dry_run=dry_run,
-    )
-
-
 def build_parser():
-    parser = argparse.ArgumentParser(description="AJP Bayesian optimization loop")
-    parser.add_argument("--config", default="bo_config.json")
+    parser = argparse.ArgumentParser(description="AJP manual Bayesian optimization")
+    parser.add_argument("--config", default=str(Path(__file__).resolve().with_name("bo_config.json")))
     parser.add_argument("--workdir", default=None)
     parser.add_argument("--template-root", default=None)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init_p = sub.add_parser("init")
-    init_p.add_argument("--initial-batch", type=int, default=0)
-    init_p.add_argument("--submit", action="store_true")
+    init_p = sub.add_parser("init", help="initialize a fresh campaign and prepare its initial design")
+    init_p.add_argument("--initial-batch", type=int, default=32)
     init_p.add_argument("--dry-run", action="store_true")
 
-    suggest_p = sub.add_parser("suggest")
-    suggest_p.add_argument("--batch-size", type=int, default=4)
-    suggest_p.add_argument("--submit", action="store_true")
+    suggest_p = sub.add_parser("suggest", help="prepare the next batch without submitting jobs")
+    suggest_p.add_argument("--batch-size", type=int, default=8)
     suggest_p.add_argument("--dry-run", action="store_true")
 
-    collect_p = sub.add_parser("collect")
-    collect_p.add_argument("--include-partial", action="store_true")
+    collect_p = sub.add_parser("collect", help="evaluate completed/failed cases once")
+    collect_p.add_argument("--cases", nargs="+", default=None)
 
-    submit_cfd_p = sub.add_parser("submit-cfd")
-    submit_cfd_p.add_argument("--dry-run", action="store_true")
+    for command in ("submit-cfd", "submit-particles"):
+        submit_p = sub.add_parser(command, help="submit selected eligible cases to local Slurm once")
+        submit_p.add_argument("--cases", nargs="+", default=None)
+        submit_p.add_argument("--dry-run", action="store_true")
 
-    submit_particle_p = sub.add_parser("submit-particles")
-    submit_particle_p.add_argument("--dry-run", action="store_true")
-
-    status_p = sub.add_parser("status")
-    status_p.set_defaults()
-
-    step_p = sub.add_parser("step")
-    step_p.add_argument("--batch-size", type=int, default=4)
-    step_p.add_argument("--max-pending", type=int, default=16)
-    step_p.add_argument("--submit", action="store_true")
-    step_p.add_argument("--dry-run", action="store_true")
-
-    loop_p = sub.add_parser("loop")
-    loop_p.add_argument("--batch-size", type=int, default=4)
-    loop_p.add_argument("--max-pending", type=int, default=16)
-    loop_p.add_argument("--sleep", type=int, default=600)
-    loop_p.add_argument("--submit", action="store_true")
-    loop_p.add_argument("--dry-run", action="store_true")
-    loop_p.add_argument("--iterations", type=int, default=0)
+    sub.add_parser("status", help="show case and queue status")
     return parser
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
-    config, config_dir = load_config(args.config)
-    if args.workdir:
-        config["workdir"] = args.workdir
-    if args.template_root:
-        config["template_root"] = args.template_root
-    workdir, base_template, particle_template = get_paths(config, config_dir)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        load_site_env()
+        config, config_dir = load_config(args.config)
+        if args.workdir:
+            config["workdir"] = args.workdir
+        if args.template_root:
+            config["template_root"] = args.template_root
+        workdir, base_template, particle_template = get_paths(config, config_dir)
 
-    if args.command == "init":
-        init_workdir(config, config_dir, workdir)
-        if args.initial_batch > 0:
-            suggest(config, workdir, base_template, args.initial_batch, submit=args.submit, dry_run=args.dry_run)
-    elif args.command == "suggest":
-        suggest(config, workdir, base_template, args.batch_size, submit=args.submit, dry_run=args.dry_run)
-    elif args.command == "collect":
-        collect_completed(config, workdir, include_partial=args.include_partial)
-    elif args.command == "submit-cfd":
-        submit_cfd(config, workdir, dry_run=args.dry_run)
-    elif args.command == "submit-particles":
-        submit_particles(config, workdir, particle_template, dry_run=args.dry_run)
-    elif args.command == "status":
-        print_status(config, workdir)
-    elif args.command == "step":
-        step(
-            config,
-            workdir,
-            base_template,
-            particle_template,
-            args.batch_size,
-            args.max_pending,
-            args.submit,
-            args.dry_run,
-        )
-    elif args.command == "loop":
-        iteration = 0
-        while True:
-            iteration += 1
-            print("loop iteration", iteration, now_iso())
-            step(
-                config,
-                workdir,
-                base_template,
-                particle_template,
-                args.batch_size,
-                args.max_pending,
-                args.submit,
-                args.dry_run,
-            )
-            if args.iterations and iteration >= args.iterations:
-                break
-            time.sleep(args.sleep)
-    else:
-        raise AssertionError(args.command)
+        if args.command == "init":
+            if args.initial_batch < 0:
+                raise ValueError("initial batch must not be negative")
+            if not args.dry_run:
+                init_workdir(config, config_dir, workdir)
+            if args.initial_batch > 0:
+                suggest(config, workdir, base_template, args.initial_batch, dry_run=args.dry_run)
+        elif args.command == "suggest":
+            suggest(config, workdir, base_template, args.batch_size, dry_run=args.dry_run)
+        elif args.command == "collect":
+            collect_completed(config, workdir, cases=args.cases)
+        elif args.command == "submit-cfd":
+            submit_cfd(config, workdir, cases=args.cases, dry_run=args.dry_run)
+        elif args.command == "submit-particles":
+            submit_particles(config, workdir, particle_template, cases=args.cases, dry_run=args.dry_run)
+        elif args.command == "status":
+            print_status(config, workdir)
+    except (ValueError, RuntimeError, OSError) as error:
+        parser.exit(1, "ERROR: %s\n" % error)
 
 
 if __name__ == "__main__":

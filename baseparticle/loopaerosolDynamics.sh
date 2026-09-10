@@ -6,10 +6,20 @@
 #SBATCH --time=02:00:00
 
 set -euo pipefail
+finish_particle()
+{
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        rm -f PARTICLE_DONE
+        touch PARTICLE_FAILED
+    fi
+}
+trap finish_particle EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 echo "[particle] script start"
-WORKER_ROOT=${AJP_WORKER_ROOT:-"$HOME/AJP-worker"}
-WORKER_ENV=${AJP_WORKER_ENV:-"$WORKER_ROOT/worker-env.sh"}
+WORKER_ENV=${AJP_WORKER_ENV-}
 if [ -r "$WORKER_ENV" ]; then
     # Host-specific OpenFOAM, solver, and Python/Gmsh locations.
     source "$WORKER_ENV"
@@ -79,6 +89,9 @@ echo "[particle] horizon mode=$MAX_TIME_MODE max_time=$MAX_TIME"
 echo "[particle] nominal inlet velocity=$INLET_VELOCITY_MPS m/s axial_length=$AXIAL_LENGTH_M m transit=$NOMINAL_TRANSIT_S s"
 
 SOLVER=${AJP_PARTICLE_SOLVER:-}
+if [ -n "$SOLVER" ] && [[ "$SOLVER" != */* ]]; then
+    SOLVER=$(command -v "$SOLVER" || true)
+fi
 if [ -z "$SOLVER" ]; then
     if command -v aerosolDynamicsFoam >/dev/null 2>&1; then
         SOLVER=$(command -v aerosolDynamicsFoam)
@@ -121,6 +134,9 @@ fi
 
 echo "[particle] launcher=${RUN_CMD[*]}"
 
+CFD_TIME=$("$PYTHON_BIN" "$CASE_DIR/cfd_fields.py" ..)
+echo "[particle] carrier CFD time=$CFD_TIME"
+
 # =========================================================
 # prepare initial particle case
 # =========================================================
@@ -136,11 +152,11 @@ find . -maxdepth 1 -type d \
         echo "[particle] removed stale time directory: $time_dir"
     done || true
 rm -rf 0
-cp -r ../10000 0 || {
-    echo "Failed to copy ../10000 to 0"
+cp -r "../$CFD_TIME" 0 || {
+    echo "Failed to copy ../$CFD_TIME to 0"
     exit 1
 }
-echo "[particle] copied 10000 -> 0"
+echo "[particle] copied $CFD_TIME -> 0"
 rm -f 0/uniform/time
 
 rm -rf constant/polyMesh
@@ -177,9 +193,9 @@ touch "p_${CASE_NUM}.foam"
 echo "[particle] touch foam marker"
 
 rm -f "$LOG"
-rm -f PARTICLE_DONE
+rm -f PARTICLE_DONE PARTICLE_FAILED
 rm -f PARTICLE_STATUS.txt
-rm -f particle_fates_all.csv
+echo "patch,time,currentProc,coord0,coord1,coord2,coord3,x,y,z,celli,tetFacei,tetPti,facei,stepFraction,origProc,origId,active,typeId,nParticle,d,dTarget,Ux,Uy,Uz,rho,age,tTurb,UTurbx,UTurby,UTurbz,UCorrectx,UCorrecty,UCorrectz,fx,fy,fz,angularMomentumx,angularMomentumy,angularMomentumz,torquex,torquey,torquez" > particle_fates_all.csv
 rm -rf "$POST_BASE_DIR"
 rm -rf processor*
 echo "[particle] cleared old outputs"
@@ -200,7 +216,7 @@ make_positions_file()
     local positions_file="constant/kinematicCloudPositions"
     local n_positions="$INJECTION_POINTS"
 
-    python3 - "$positions_file" "$n_positions" <<'PY'
+    "$PYTHON_BIN" - "$positions_file" "$n_positions" <<'PY'
 from __future__ import annotations
 
 import sys

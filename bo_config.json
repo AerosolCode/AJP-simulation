@@ -1,5 +1,5 @@
 {
-  "workdir": ".",
+  "workdir": "campaigns/manual_structured_finite_radius",
   "template_root": ".",
   "base_template": "base",
   "particle_template": "baseparticle",
@@ -110,7 +110,6 @@
     "sbatch": "sbatch",
     "squeue": "squeue",
     "user": "",
-    "nodelist": "xeon6",
-    "particle_job_prefix": "P_"
+    "nodelist": ""
   }
 }

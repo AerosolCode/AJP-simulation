@@ -1,566 +1,305 @@
 \documentclass[a4paper,11pt]{article}
-
 \usepackage{luatexja}
 \usepackage{luatexja-fontspec}
 \setmainjfont{Noto Serif CJK JP}
 \setsansjfont{Noto Sans CJK JP}
 \setmonojfont{Noto Sans Mono CJK JP}
 \usepackage[margin=20mm]{geometry}
-\usepackage{amsmath}
-\usepackage{booktabs}
-\usepackage{array}
-\usepackage{tabularx}
-\usepackage{longtable}
-\usepackage{enumitem}
-\usepackage{graphicx}
-\usepackage{xcolor}
+\usepackage{amsmath,booktabs,tabularx,enumitem}
 \usepackage[hidelinks,unicode]{hyperref}
-\emergencystretch=2em
-
-\definecolor{statusgreen}{RGB}{32,115,70}
-\definecolor{statusamber}{RGB}{167,102,0}
-\definecolor{statusred}{RGB}{170,45,45}
-\newcommand{\done}{\textcolor{statusgreen}{完了}}
-\newcommand{\pending}{\textcolor{statusamber}{要確認}}
-\newcommand{\todo}{\textcolor{statusred}{未完了}}
-\newcommand{\code}[1]{\texttt{#1}}
-\setlist{nosep,leftmargin=24pt}
+\emergencystretch=3em
+\setlist{nosep,leftmargin=22pt}
 \renewcommand{\arraystretch}{1.18}
-
-\hypersetup{
-  pdftitle={AJP simulation 総合現状・計算手法・移行計画},
-  pdfauthor={AJP simulation workspace}
-}
-
-\title{AJP simulation\\総合現状・計算手法・移行計画}
+\newcommand{\code}[1]{\texttt{#1}}
+\hypersetup{pdftitle={AJP simulation 手動BO運用・計算手法ガイド},pdfauthor={AJP simulation workspace}}
+\title{AJP simulation\\手動BO運用・計算手法ガイド}
 \author{AJP simulation workspace}
-\date{2026年9月9日}
+\date{2026年9月10日}
 
 \begin{document}
 \maketitle
-\tableofcontents
-\clearpage
 
-\section{この文書の位置づけ}
+\section{本版の目的と、ここまでの流れ}
 
-本書は、分散していた開発メモ、運用報告、障害調査、メッシュ検討、および有限半径
-壁面沈着の導入手順を整理し、AJPノズル最適化計算の\textbf{現行正本}としてまとめた
-ものである。以下を一冊で判断できることを目的とする。
+本書は\code{main}ブランチの正本である。AJPノズルの11設計変数からstructuredメッシュを
+生成し、定常CFD、有限半径粒子追跡、3目的2制約の評価、次候補提案を行う。
+候補を作る・計算へ投入する・結果を回収する・次へ進むという判断を利用者が一段ずつ行う。
 
-\begin{itemize}
-  \item ここまで何を実装・検証してきたか
-  \item 現在のコードがどの計算手法を採用しているか
-  \item どこまでを計算結果として信用でき、何が未検証か
-  \item 次の本番キャンペーンより前に何をしなければならないか
-\end{itemize}
-
-CFD発散のログ分析、失敗点統計、同一メッシュA/B試験の全詳細は、別冊
-\nolinkurl{cfd_failure_diagnosis_ja.tex}を根拠資料として残す。本書に記載するクラスタ上の
-観測件数は過去レポートのスナップショットであり、XEON各ホストのライブ状態は
-2026年9月9日時点で未確認である。
-
-\section{エグゼクティブサマリー}
-
-本プロジェクトは、11設計変数からAJPノズル形状・流量を生成し、Gmsh/OpenFOAMの
-定常RANS、Lagrangian粒子追跡、3目的2制約の多目的ベイズ最適化を、4ホスト最大16枠で
-非同期実行する段階まで拡張されている。
-
-2026年9月8日には、従来不足していた有限粒径の壁面直接さえぎりを
-\code{finiteRadiusDeposition}として追加した。OpenFOAM v2406での共有ライブラリbuild、
-実行時load、強制接触1000 parcelのイベント記録・除去、unit testの通過までは
-ローカルで確認した。したがって、\textbf{現行テンプレートの計算には固定壁面に対する
-有限半径の直接さえぎり判定が入っている}。ただし、4 particle shard実行、各クラスタ
-環境、時間刻み・メッシュ感度、および旧点粒子結果とのA/B比較は未完了である。
-
-有限半径判定は粒子の運命と3目的値を変えるため、導入前の1,209件以上の履歴を新結果へ
-混ぜてはならない。現行設定は
-\code{central\_target\_d10um\_mobo\_v2\_structured\_finite\_radius}、campaignは
-\code{mobo\_target10um\_v2\_structured\_finite\_radius}へ分離し、baselineを0にした。
-旧設定と生成済み検証caseはarchiveへ退避した。次の本番計算前には、代表点を有限半径法で
-再計算して新しいseedを作る必要がある。
-
-production meshはstructured wedgeへ一本化した。正本は\code{base/meshGen2.py}であり、
-通常ケース、BOケース、mesh sweepのすべてが同じgeneratorを使う。旧unstructured版は
-\nolinkurl{archive/mesh/meshGen2_unstructured.py}へ移し、productionから参照しない。
-
-同日、\code{potentialFoam}の全件SIGFPEの原因を、入口速度境界が未初期化のまま
-\code{-writep}へ進んでいたことと特定した。\code{-initialiseUBCs -writep}へ修正し、
-structured実meshで\code{potentialFoam}と100反復の\code{simpleFoam}が正常終了することを
-確認した。\code{simpleFoam}には保守的な\code{residualControl}も追加し、10,000反復は
-収束しない場合の上限として残した。
-
-\section{これまでの流れ}
-
-\begin{longtable}{p{21mm}p{82mm}p{48mm}}
-\toprule
-時期 & 主な作業 & 現在の扱い \\
-\midrule
-\endhead
-2026-06-02 & 初期CFD・粒子計算ファイルを作成。 & 基礎として継続。 \\
-2026-07-03 & SLURM上のケース生成、CFD、粒子、後処理を一連のpipelineとして整備。 & 継続使用。 \\
-2026-07中旬 & scalar BO、中央直径10\,$\mu$m target、ケース回収・再提案を実装。 & 旧キャンペーン。 \\
-2026-07-22 & 異常CFD場が粒子solverを停止させる問題を調査。CFD完了guard、粒子field検査、parser、注入位置を修正。 & コードへ反映済み。 \\
-2026-07-23 & 大形状でunstructured meshが肥大化する問題を分析。structured generatorとsweepを作成。 & sweep合格。 \\
-2026-07-24 & XEON6/1/4/5への分散dispatcherを整備。各4枠、最大16件を非同期運用。 & 設計は現行。ライブ状態は要確認。 \\
-2026-07-27 & scalar v1、lexicographic v2を経て、3目的2制約のqLogNEHVIへ移行。旧履歴1,209件を再処理。 & 有限半径導入前の履歴。 \\
-2026-07-27 & CFD失敗を統計・ログ・同一メッシュA/Bで診断。圧力をequation緩和からfield緩和へ変更。 & 修正反映済み。 \\
-2026-09-08 & 有限半径壁面沈着を実装し、直接さえぎりを追加。 & ローカルserial検証済み。本番移行前。 \\
-2026-09-08 & meshをstructuredへ一本化。\code{potentialFoam}の入口BC初期化を修正し、\code{residualControl}を導入。 & 実mesh smoke test済み。 \\
-2026-09-08 & 新規計算に向け、旧configと2.9\,GBの生成済み\code{test\_cases}をarchive。active campaign/versionを有限半径版へ分離しbaselineを0化。 & 新campaignは未投入。 \\
-2026-09-09 & GitHub共有用に利用者固有設定を\code{site.env}へ分離。ユーザー名、worker領域、coordinator用Pythonを一か所で変更可能にした。 & 設定診断・回帰テストを追加。 \\
-\bottomrule
-\end{longtable}
-
-この流れを整理すると、これまでの中心課題は「多数形状を止めずに評価する基盤の構築」
-から、「評価値を物理的・数値的に一貫させて新しいMOBOを開始すること」へ移っている。
-
-\section{現行計算フローと正本コード}
+これまで、圧力緩和とCFD完了判定の修正、structuredメッシュへの一本化、
+\code{potentialFoam}のSIGFPE修正、\code{residualControl}の導入を行った。
+2026年9月8日に有限半径の壁面直接さえぎりを追加し、9月9日に利用者・SSH環境の設定を
+整理した。9月10日に、自動版と手動版を同時運用できるようブランチを分けた。
 
 \begin{center}
-\begin{tabularx}{\textwidth}{>{\bfseries}p{34mm}X}
+\begin{tabularx}{\textwidth}{p{32mm}X}
 \toprule
-処理 & 正本となる実装 \\
+版 & 運用と保管内容 \\
 \midrule
-候補生成・目的評価 & \code{bo\_loop.py}, \code{mobo.py}, \code{bo\_config.json} \\
-4ホスト制御 & \code{tools/bo\_multihost.py}, \code{bo\_multihost\_config.json} \\
-CFD template & \code{base/}, 特に\code{base/run.sh}と\code{base/system/} \\
-メッシュ & structured正本: \code{base/meshGen2.py}; 旧unstructured: \code{archive/mesh/meshGen2\_unstructured.py} \\
-粒子template & \code{baseparticle/}, 特に\code{loopaerosolDynamics.sh} \\
-有限半径接触 & \code{baseparticle/custom/finiteRadiusDeposition/} \\
-粒子集計 & \code{particle\_fates\_all.csv}生成部と\code{bo\_loop.py} \\
+\code{main} & 本書の手動版。各段階を利用者が実行する。実行に必要なコードと本ガイドを保持。 \\
+自動版 & \nolinkurl{feature/structured-finite-radius-mobo-v2}。
+複数ホストの常駐dispatcher、自動投入・回収・反復、および旧資料を保持。
+分岐時点のcommitは\code{1a04973}。 \\
 \bottomrule
 \end{tabularx}
 \end{center}
 
-処理の流れは次の通りである。
+両版は別ディレクトリへcloneする。実行中のcloneでブランチを切り替えると、ジョブが
+参照するスクリプトも変わる。手動版の既定出力先は
+\nolinkurl{campaigns/manual_structured_finite_radius/}である。自動版のcase・観測CSVを
+共有しない。過去の点粒子モデルの観測も、新しい有限半径モデルの学習へ直接混ぜない。
 
-\begin{enumerate}
-  \item 11次元の候補を生成し、派生寸法・流量と幾何制約を計算する。
-  \item Gmshでstructured 5度wedge meshを作成し、OpenFOAMへ変換する。
-  \item \code{potentialFoam -initialiseUBCs -writep}で初期場を作る。失敗時はcaseを停止する。
-  \item \code{simpleFoam}で定常RANSを解き、残差収束または10,000反復で停止する。
-  \item CFD終了印、ログの\code{End}、最大速度を検査し、異常場を粒子段へ渡さない。
-  \item \code{aerosolDynamicsFoam}で1000 parcelを追跡する。
-  \item 標準の中心軌道壁面衝突と、有限半径の直接さえぎりを集計する。
-  \item outlet、substrate、各nozzle wall、未解決へ分類する。
-  \item 3目的・2制約へ変換し、制約付きqLogNEHVIで次候補を提案する。
-  \item coordinatorが空いたホスト枠へ投入し、結果を回収する。
-\end{enumerate}
+\section{利用者が変わるときの設定}
 
-\section{設計空間と幾何制約}
+計算用クラスタには本人のSSHユーザーでログインし、そのクラスタのclone内で操作する。
+本版はホスト間SSHを制御しないため、SSHのユーザー名はログイン時に指定する。
+Python・OpenFOAMなどの利用者固有値は\code{site.env}へ集約する。
 
-直接操作する変数と現在の範囲を表\ref{tab:variables}に示す。派生寸法は
-\code{bo\_loop.py}内の変換関数で計算される。
+\begin{verbatim}
+cp site.env.example site.env
+${EDITOR:-vi} site.env
+source ./site.env
+"$AJP_PYTHON_BIN" tools/check_site_config.py
+\end{verbatim}
 
-\begin{table}[htbp]
-\centering
-\caption{11設計変数}
-\label{tab:variables}
+\begin{center}
+\begin{tabularx}{\textwidth}{p{59mm}X}
+\toprule
+設定項目 & 意味 \\
+\midrule
+\code{AJP\_PYTHON\_BIN} & NumPy・Gmshが利用できるPython。計算ノードから見える絶対パスを推奨。 \\
+\code{AJP\_OPENFOAM\_BASHRC} & 使用するOpenFOAMの\code{etc/bashrc}。 \\
+\code{AJP\_PARTICLE\_SOLVER} & 粒子solverのパス。空ならOpenFOAM環境のPATHから探索。 \\
+\code{AJP\_SLURM\_NODELIST} & 投入先node。空ならSlurmが選択。 \\
+\code{AJP\_WORKER\_ENV} & 通常は空。旧\code{worker-env.sh}の読み込みを無効化。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\code{site.env}はGit管理外であり、\code{bo\_loop.py}が読み込んでSlurmジョブへ渡す。
+自動版とは設定項目が異なるため、手動版の\code{site.env.example}から新しく作成する。
+共有する形状範囲・目的関数・出力先は\code{bo\_config.json}で管理する。
+Slurmが選ぶ各nodeから、clone、Python、OpenFOAMと粒子solverを利用できる必要がある。
+
+OpenFOAMとSlurmが導入された環境で、次を実行する。
+
+\begin{verbatim}
+"$AJP_PYTHON_BIN" -m pip install numpy gmsh
+bash tools/build_solver.sh "$AJP_OPENFOAM_BASHRC" \
+  "$PWD/vendor/aerosolDynamicsFoam"
+"$AJP_PYTHON_BIN" tools/check_site_config.py --local-tools
+
+# 有効観測32件以上からBO提案する前に導入
+"$AJP_PYTHON_BIN" -m pip install -r requirements-mobo.txt
+\end{verbatim}
+
+buildスクリプトは同梱粒子solverと\code{finiteRadiusDeposition}を作成する。
+実行solverと同じOpenFOAM・利用者環境でbuildする。OpenFOAMの版が異なる環境へ
+共有ライブラリのbinaryを流用しない。
+
+\section{手動BOの操作手順}
+
+以下はclone直下での例である。\code{init}と\code{suggest}は候補生成だけを行い、
+ジョブを投入しない。最初は少数caseで全段階を確認する。
+
+\subsection{初期候補とCFD}
+
+\begin{verbatim}
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  init --initial-batch 32
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  submit-cfd --cases case_0000 case_0001 --dry-run
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  submit-cfd --cases case_0000 case_0001
+\end{verbatim}
+
+\code{--dry-run}で投入内容を確認してから実際に投入する。
+\code{squeue -u "\$USER"}、\code{status}と各caseのログを確認し、CFDの成功後に粒子へ進む。
+残差停止で10,000反復前に終了した場合も、実際の最新CFD時刻の流れ場を粒子へ渡す。
+
+\subsection{粒子追跡と回収}
+
+\begin{verbatim}
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  submit-particles --cases case_0000 case_0001 --dry-run
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  submit-particles --cases case_0000 case_0001
+
+# 粒子計算の終了を確認してから回収
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  collect --cases case_0000 case_0001
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+\end{verbatim}
+
+\code{collect}は\code{particle\_fates\_all.csv}を評価し、campaign内の
+\code{bo\_observations.csv}へ反映する。\code{--cases}を省略した回収はcampaign全体を対象とする。
+ログと評価値を確認し、同じ手順で残りの初期候補を評価する。
+
+\subsection{次候補と終了判断}
+
+\begin{verbatim}
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  suggest --batch-size 8
+\end{verbatim}
+
+有効観測が32件未満なら空間充填maximin、32件以上なら制約付き
+\code{qLogNEHVI}で候補を提案する。学習点上限384、候補pool 2048、Monte Carlo sample 64が
+現在の設定である。次に投入するcase、失敗後の再試行、次batchへ進む時点、計算予算と
+終了条件は利用者が判断する。自動の予算停止・停滞停止は本版にはない。
+
+\code{status}の\code{cfd\_failed}または\code{particle\_failed}はログを確認する。
+再試行は回収前に原因を修正し、該当段階の\code{*\_FAILED}印だけを取り除いてから再投入する。
+失敗として観測に残す場合は\code{collect}する。強制終了では失敗印が残らない場合もあり、
+Slurmの\code{sacct}でも確認する。\code{squeue}を確認できないときは投入を停止する。
+
+\section{計算手法}
+
+\subsection{設計変数とstructuredメッシュ}
+
+11設計変数の現在の範囲を示す。派生寸法と幾何制約は\code{bo\_loop.py}で計算する。
+
+\begin{center}
 \begin{tabular}{lll}
 \toprule
-変数 & 範囲 & 概要 \\
+変数 & 範囲 & 内容 \\
 \midrule
-\code{R\_mm} & 0.5--2.0 & 基準半径 \\
+\code{R\_mm} & 0.5--2.0 & 基準半径 [mm] \\
 \code{alphaRin} & 0.3--0.7 & 内側入口半径比 \\
 \code{alphaL0} & 1.0--5.0 & 上流長さ比 \\
-\code{L1\_mm} & 1.0--20.0 & 軸方向長さ \\
+\code{L1\_mm} & 1.0--20.0 & 軸方向長さ [mm] \\
 \code{alphaL2} & 0.5--5.0 & 下流長さ比 \\
 \code{alphaL3} & 0.0--1.0 & 追加長さ比 \\
-\code{theta0\_deg} & 10--60 deg & 第1傾斜角 \\
-\code{theta1\_deg} & 10--60 deg & 第2傾斜角 \\
+\code{theta0\_deg}, \code{theta1\_deg} & 各10--60 & 傾斜角 [deg] \\
 \code{alphaTheta2} & 0.0--1.0 & 第3角度比 \\
 \code{alphat} & 0.5--5.0 & 厚さ比 \\
-\code{U\_mps} & 1--50 m/s & 基準入口速度 \\
+\code{U\_mps} & 1--50 & 基準入口速度 [m/s] \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{center}
 
-生成後には、軸方向全長$\leq120$ mm、$L_2\leq70$ mm、$l_2\leq45$ mm、
-$l_{2y}\leq45$ mm、$R_3\leq45$ mmを課す。これらは物理的実現性だけでなく、極端に
-大きいmeshを候補生成前に抑える計算費用上の制約でもある。
+全長$\leq120$ mm、$L_2\leq70$ mm、$l_2,l_{2y},R_3\leq45$ mmを課す。
+\code{base/meshGen2.py}は断面をblockへ分割し、$y$軸まわりの5度、一層wedgeの
+structuredメッシュを生成する。通常の上限は120,000 nodes、360,000 elementsである。
+unstructured版は本版の選択肢に含めない。
 
-\section{メッシュ生成}
+\subsection{搬送流CFD}
 
-\subsection{共通仕様}
+Gmshから\code{gmshToFoam}で変換し、\code{potentialFoam -initialiseUBCs -writep}で
+初期場を作る。\code{-initialiseUBCs}は入口流量境界を評価するために必要であり、
+全域ゼロ速度のまま圧力近似へ進んだ旧版のSIGFPEへの修正である。初期化の失敗は
+CFD失敗として扱う。
 
-軸対称断面を$y$軸まわりに5度回転した一層wedgeを用いる。境界patchは
-\code{inletAerosol}, \code{inletSheath}, \code{outlet},
-\code{wallUpper}, \code{wallDown}, \code{wallCavity},
-\code{wallSubstrate}, \code{front}, \code{back}である。production環境変数でmeshを
-120,000 nodes、360,000 elements以下に制限している。
+搬送流は非圧縮・定常\code{simpleFoam}、RASモデル\code{kOmegaSST}で解く。
+入口は\code{flowRateInletVelocity}でwedge角に対応する流量を与え、固定壁は
+\code{noSlip}、前後面は\code{wedge}とする。圧力はfield緩和0.3、$U,k,\omega$は
+equation緩和0.7、初期値は$k=10^{-4}$、$\omega=1$である。
 
-\subsection{structuredへの一本化}
+\code{residualControl}は$p<10^{-5}$、$U<10^{-4}$、$k,\omega<10^{-5}$を使い、
+最大10,000反復で停止する。solverの終了状態、ログの\code{End}、最大速度を検査し、
+\code{CFD\_DONE}または\code{CFD\_FAILED}を記録する。$\max|U|\leq10{,}000$ m/sという
+上限は数値異常のguardであり、物理的妥当性や十分な収束を保証する条件ではない。
 
-structured版は断面をblock状に分割し、軸方向・半径方向の分割数を制御する。旧
-unstructured版は距離field細分化によって大形状でcell数が急増したため、productionから
-外してarchiveへ移した。
+\subsection{粒子追跡と有限半径のさえぎり}
 
-structured sweepではedge 12/12形状がwedge角1度と5度の両方で
-\code{checkMesh}に合格し、5度時のcell数は19,635--77,537、最大non-orthogonalityは
-59.6808、最大skewnessは1.52498であった。追加random 10/10形状も
-\code{checkMesh}と短時間\code{simpleFoam}に合格した。2026年9月8日以降は
-\code{base/meshGen2.py}そのものをstructured正本とし、BO側の条件付き上書き処理も削除した。
-今後のmethod metadataには\code{mesh=structured}とgenerator revisionを常に記録する。
+\code{vendor/aerosolDynamicsFoam}の\code{basicKinematicCloud}による、一方向連成の
+Lagrangian追跡を用いる。現在の力モデルは\code{sphereDrag}で、搬送流速度を
+\code{cellPoint}補間する。粒径は0.1, 0.2, 0.3, 0.5, 0.8, 1, 2, 3, 5, 7\,$\mu$m、
+各bin 100位置で合計1000 parcelである。
 
-\section{搬送流CFD}
-
-\subsection{物理モデルと境界条件}
-
-carrierは非圧縮・定常の\code{simpleFoam}で解き、RAS乱流モデルに\code{kOmegaSST}を
-使う。入口のaerosol流とsheath流は\code{flowRateInletVelocity}で与え、5度wedgeに対応する
-流量へ換算する。固体壁は\code{noSlip}、front/backは\code{wedge}とする。
-
-現行の主な数値設定は次である。
-
-\begin{itemize}
-  \item 圧力: \code{relaxationFactors/fields/p = 0.3}
-  \item $U,k,\omega$: equation under-relaxation 0.7
-  \item 残差停止: $p<10^{-5}$、$U<10^{-4}$、$k,\omega<10^{-5}$
-  \item 最大反復: 10,000（残差条件を満たさない場合の上限）
-  \item 初期乱流量: $k=10^{-4}$、$\omega=1$
-\end{itemize}
-
-\subsection{完了判定と既知問題}
-
-\code{simpleFoam}の終了code、ログ末尾の\code{End}、
-$\max|U|\leq10{,}000$ m/sを確認し、\code{CFD\_DONE}または\code{CFD\_FAILED}を置く。
-このguardにより、数値発散した速度場を粒子solverへ渡さない。
-
-2026年7月の失敗35件では、圧力をequation側で緩和した旧設定が直接原因であった。同一
-meshの代表3件をfield緩和へ変更すると800反復を完走した。高い
-\code{theta0\_deg}は不安定性を顕在化させたが、それ自体を不可能形状の根拠にはできない。
-詳細は別冊\code{cfd\_failure\_diagnosis\_ja.pdf}を参照する。
-
-\code{potentialFoam}は過去の調査対象179/179件でSIGFPEとなっていた。原因は、生成直後の
-\code{U}で\code{flowRateInletVelocity}の保存値がゼロのままなのに、境界条件を評価せず
-\code{-writep}へ進んだことである。全域$U=0$となり、圧力近似に使う流向filter
+解析的位置追跡を有効にし、時間刻み上限$10^{-4}$ s、集計chunk 0.1 sとする。
+95\%のfateが確定するか、次の設計別上限へ到達すると停止する。
 \[
- \boldsymbol{F}=\frac{\boldsymbol{U}\boldsymbol{U}}
- {|\boldsymbol{U}|^2+\mathrm{SMALL}\,\langle|\boldsymbol{U}|^2\rangle}
+ T_{\max}=\min\!\left(5\ \mathrm{s},\max\!\left(0.5\ \mathrm{s},3T_{\mathrm{transit}}\right)\right).
 \]
-の分母もゼロになってSIGFPEを起こしていた。
+既定の4並列はmeshの領域分割ではなく、各rankがfull meshを持ち、注入粒子を
+4 shardへ分ける方式である。
 
-現行は\code{potentialFoam -initialiseUBCs -writep}とし、入口流量境界を評価してから解く。
-structured実meshのlocal testでは、Phiと$p$を非ゼロ反復で解き、SIGFPEなしで\code{End}へ
-到達した。続く\code{simpleFoam}も100反復を正常完走した。今後はpotential初期化の失敗を
-無視せず、\code{CFD\_FAILED}として停止する。
-
-\code{residualControl}は上記の保守的閾値で導入済みである。閾値を満たすケースだけを早期
-終了し、満たさないケースは従来通り最大10,000反復まで進む。粒子目的値に対する停止閾値
-感度はsmall batchで引き続き確認する。
-
-\section{粒子追跡}
-
-\subsection{基礎モデル}
-
-vendored \code{aerosolDynamicsFoam}の\code{basicKinematicCloud}を用いるone-way uncoupled
-Lagrangian trackingである。粒子速度$\boldsymbol{u}_p$はcarrier速度を
-\code{cellPoint}補間し、現在の力モデルは\code{sphereDrag}のみである。
-
-粒径は0.1, 0.2, 0.3, 0.5, 0.8, 1, 2, 3, 5, 7\,$\mu$mの10 bin、各bin 100位置、
-合計1000 parcelである。\code{analyticPositionTracking true}、時間刻み上限$10^{-4}$ s、
-集計chunk 0.1 sとする。95\%のfateが確定するか、
+標準の\code{standardWallInteraction/stick}による中心軌道の衝突に加え、
+\code{finiteRadiusDeposition}が移動区間と固定壁面の距離を調べる。有効半径は
 \[
- T_{\max}=\min\!\left(5\ \mathrm{s},\ \max\!\left(0.5\ \mathrm{s},\
- 3T_{\mathrm{transit}}\right)\right)
+ r_{\mathrm{eff}}=f_r d_p+\delta,\qquad f_r=0.5,\quad\delta=0
 \]
-へ到達した時点で停止する。
+であり、粒子表面が初めて壁に触れる点で沈着とする。候補faceを空間検索し、距離と
+二分探索で最初の接触位置を求め、patch、粒径、粒子ID、中心と壁面座標を記録して
+parcelを除去する。対象は\code{wallSubstrate}, \code{wallUpper}, \code{wallDown},
+\code{wallCavity}である。各shardのイベントを\code{particle\_fates\_all.csv}へ統合する。
 
-4並列は通常の\code{decomposePar}ではない。各rankがfull meshを持ち、注入粒子を4 shardへ
-分けて\code{-particleParallel -nParticleShards 4}で追跡し、後でfateを結合する。
+これは固定壁への幾何学的な直接さえぎりである。先に堆積した粒子による遮蔽、堆積層の
+成長、粒子同士の衝突・凝集、二方向連成、Brownian/random forceと乱流分散は含まない。
 
-\subsection{有限半径による直接さえぎり}
+\subsection{3目的と2制約}
 
-標準\code{standardWallInteraction/stick}は、粒子中心軌道がpatchへ到達した場合を捕捉する。
-これに加え、共有ライブラリ\code{finiteRadiusDeposition}が各移動区間
-$\boldsymbol{x}_0\rightarrow\boldsymbol{x}_1$に対して有効半径
-\[
- r_{\mathrm{eff}}=f_r d_p+\delta
-\]
-を用いる。現行値は$f_r=0.5$、$\delta=0$であり、球形粒子の物理半径$d_p/2$に相当する。
-
-アルゴリズムは次の通りである。
-
-\begin{enumerate}
-  \item 対象wall faceからoctreeを構築する。
-  \item 移動segmentのbounding boxを$r_{\mathrm{eff}}$だけ広げ、候補faceを検索する。
-  \item segmentとfaceの最小距離が$r_{\mathrm{eff}}$以下となる候補を抽出する。
-  \item 各候補の最小距離位置までを32回二分探索し、最初に
-    $\mathrm{dist}(\boldsymbol{x},\mathrm{wall})\leq r_{\mathrm{eff}}$となる位置を求める。
-  \item 最も早い接触をpatch名、粒径、particle ID、中心・壁面座標とともに記録し、
-    parcelを除去する。
-\end{enumerate}
-
-対象patchは\code{wallSubstrate}, \code{wallUpper}, \code{wallDown},
-\code{wallCavity}、actionは\code{remove}である。イベントは各shardから
-\code{particle\_fates\_all.csv}へ統合される。
-
-\subsection{「さえぎり」に含むものと含まないもの}
-
-本実装が含むのは、既に抗力で計算された粒子中心軌道に対し、固定壁面と有限半径球の
-幾何学的初回接触を加える\textbf{直接さえぎり}である。中心が壁面を横切らなくても表面が
-触れれば沈着する。
-
-次は含まない。
-
-\begin{itemize}
-  \item 先に沈着した粒子が後続粒子を遮る効果
-  \item 堆積層成長による壁面形状・carrier流れ場の変化
-  \item 粒子同士の衝突・凝集
-  \item 粒子からcarrierへの二方向連成
-  \item Brownian/random forceおよび乱流分散
-\end{itemize}
-
-したがって、「さえぎりを入れた」ことと、堆積成長・目詰まりまでモデル化したことは
-区別しなければならない。
-
-\section{粒子fateと目的関数}
-
-粒子は\code{outlet}, \code{wallSubstrate}, \code{wallUpper},
-\code{wallDown}, \code{wallCavity}, unresolvedへ分類する。注入総数を$N_{\rm inj}$、
-基板中心$(x,z)=(0,0)$の半径5\,$\mu$m円内を$N_{\rm target}$、基板到達総数を
-$N_{\rm substrate}$、基板以外の3 wallへの沈着を$N_{\rm wall}$とする。現行の3目的は
-すべて最大化である。
-
+注入数を$N_{\rm inj}$、基板中心$(x,z)=(0,0)$の半径5\,$\mu$m円内へ到達した数を
+$N_{\rm target}$、基板到達総数を$N_{\rm substrate}$、他の3壁への沈着数を
+$N_{\rm wall}$とする。次の3目的を最大化する。
 \begin{align}
- f_1 &= \frac{N_{\rm target}}{N_{\rm inj}},\\
- f_2 &=
- \begin{cases}
+ f_1 &= N_{\rm target}/N_{\rm inj},\\
+ f_2 &= \begin{cases}
  N_{\rm target}/N_{\rm substrate}, & N_{\rm substrate}>0,\\
  0, & N_{\rm substrate}=0,
  \end{cases}\\
  f_3 &= \frac{5}{5+r_{90}[\mu\mathrm{m}]}
-        \min\!\left(1,\frac{N_{\rm target}}{20}\right).
+       \min\!\left(1,\frac{N_{\rm target}}{20}\right).
 \end{align}
-
-$r_{90}$は基板粒子位置全体についてtarget中心から測った距離の90\%分位である。第3目的は
-狭い分布を好むだけでなく、target粒子が少ない場合の見かけ上の高compactnessをsupport項で
-抑える。
-
-制約は
+$r_{90}$は基板到達粒子の、target中心からの距離の90\%分位である。
+基板到達粒子がないときは$f_3=0$とする。制約は
 \[
- \frac{N_{\rm resolved}}{N_{\rm inj}}\geq0.95,
- \qquad
- \frac{N_{\rm wall}}{N_{\rm inj}}\leq0.05
+ N_{\rm resolved}/N_{\rm inj}\geq0.95,\qquad
+ N_{\rm wall}/N_{\rm inj}\leq0.05
 \]
-である。有限半径イベントも同じfate CSVへ入るため、直接さえぎりの追加は特に
-$N_{\rm wall}$、$N_{\rm substrate}$、$N_{\rm target}$を変え得る。
+である。有限半径の追加は壁面・基板沈着数と目的値を変え得るため、物理設定と
+objective versionを観測に対応させて保管する。
 
-\section{多目的ベイズ最適化と分散実行}
+\section{検証状況と、本計算前に残る作業}
 
-現行はBoTorchの制約付き\code{qLogNEHVI}で、3目的のPareto frontとhypervolumeを扱う。
-初期点が32件に満たない間は空間充填候補を用いる。主な設定は次である。
+過去の検証ではstructuredの端点12形状とrandom 10形状のmesh検査、代表caseのCFD安定化、
+修正後\code{potentialFoam}の正常終了を確認した。有限半径についてはOpenFOAM v2406での
+build/loadと、serialでの強制1000接触イベントの記録・除去を確認した。
+これらは分岐前に行った検証の記録であり、本版によるクラスタ上の新たな本番計算の実績ではない。
 
-\begin{center}
-\begin{tabular}{lr}
-\toprule
-項目 & 現行値 \\
-\midrule
-候補pool & 2048 \\
-GP学習点上限 & 384 \\
-recent学習点 & 64 \\
-Monte Carlo sample & 64 \\
-acquisition batch処理 & 128 \\
-初期batch & 32 \\
-1回の追加batch & 8 \\
-最大pending & 16 \\
-\bottomrule
-\end{tabular}
-\end{center}
+本版のソース回帰テストは次で実行する。
+\begin{verbatim}
+python3 -m unittest discover -s tests -v
+\end{verbatim}
+ソースの回帰テストと設定診断は、実solver・並列実行・物理モデルの妥当性の検証を代替しない。
+本計算前には次を確認する。
 
-XEON6がcoordinatorとなり、XEON6、XEON1、XEON4、XEON5の各4枠へ独立Slurm jobを
-割り当てる。現行の新campaignはbaseline 0、新規最大256観測、最小96観測後に
-hypervolume改善が96観測停滞すれば終了する。旧campaignのbaseline 1,209観測と設定は
-\nolinkurl{archive/configs/}へ保存し、新GPへ読み込まない。
+\begin{enumerate}
+ \item 使用する各実行環境でsolverと有限半径libraryをbuildし、少数caseで
+ CFD投入、粒子投入、fate回収、目的評価までを通す。
+ \item 同一caseで\code{radiusFactor=0}と0.5、serialと4 shardを比較する。
+ 粒子収支、IDの重複、接触距離とpatch分類を確認する。
+ \item structuredメッシュ密度と粒子時間刻みの感度を確認する。
+ \item residual停止と固定反復で粒子目的値を比較し、CFD停止閾値を確定する。
+ \item 有限半径法で初期観測を新たに取得し、方法・設定・ソースrevisionを記録してBOへ進む。
+\end{enumerate}
 
-新campaign directoryにはgeneration 0のmaximin初期候補32件を作成済みである。全候補が
-幾何・計算量制約を満たし、観測0、Slurm投入0、host割当0の準備状態にある。観測数が
-\code{gp\_min\_points=32}未満の間はPyTorch/BoTorchをloadせず、空間充填maximinを明示的に
-使う。32件の評価後に初めてqLogNEHVIへ移る。
+手動版と自動版の同時運用では、出力先を分離したうえで同じSlurm資源の総使用量も確認する。
+新しい調査は独立した重複報告を増やさず、本書に条件・結論・根拠となるcaseを追記する。
 
-各hostでOpenFOAM版が同一とは限らない。共有ライブラリのbinaryを使い回さず、同じsourceと
-辞書設定から、各hostの実行solverと同じOpenFOAM ABIで個別buildする必要がある。
-
-\subsection{GitHub共有と利用者ごとの設定}
-
-Linux login名やhome directoryを共有configへ直書きしない。GitHubで追跡する
-\code{site.env.example}を各利用者が\code{site.env}へコピーし、次の利用者固有値を初回に設定する。
-
-\begin{itemize}
-  \item \code{AJP\_MASTER\_PYTHON}: XEON6 coordinator用Python
-  \item \code{AJP\_SSH\_USER\_XEON1/4/5}: remote hostごとのSSH login名。host間で異なる値を許す。
-  \item \code{AJP\_WORKER\_ROOT\_XEON6/1/4/5}: hostごとの利用者用worker領域の絶対path
-\end{itemize}
-
-\code{site.env}は\code{.gitignore}の対象であり、commitしない。共有する計算設定
-\nolinkurl{bo_config.json}と\nolinkurl{bo_multihost_config.json}には、物理条件、campaign、
-host addressを残す。dispatcherはhost別の環境変数を展開し、SSH targetを各hostの利用者名と
-addressから組み立てる。remote case pathとSlurmへ渡す\code{AJP\_WORKER\_ROOT}もhostごとに
-切り替える。この分離により、学生は共有configを書き換えずに同じ計算を実行でき、個人pathの
-誤commitも避けられる。
-
-各host固有のOpenFOAM環境は\code{tools/worker-envs/<host>.sh}を共有正本とし、実行先の
-各hostの\code{AJP\_WORKER\_ROOT\_<HOST>/worker-env.sh}へ配置する。template中の利用者pathは
-\code{\$HOME}から決まる。一方、OpenFOAMのinstall pathとABIはhost固有なので、cluster更新時は
-template確認とcustom libraryの再buildが必要である。
-
-\section{問題、原因、対策の整理}
-
-\begin{longtable}{p{40mm}p{59mm}p{52mm}}
-\toprule
-問題 & 判明した原因・意味 & 対策と状態 \\
-\midrule
-\endhead
-CFD発散後に粒子計算が止まる & 異常$U$場を粒子solverへ渡していた。 & 完了guardとfield検査を追加。\done \\
-代表CFDがSIGFPE/異常速度 & 圧力equation under-relaxationで連続の式誤差が先行増大。 & \code{fields/p=0.3}へ変更し、代表3件で安定化。\done \\
-$k,\omega$初期値がほぼゼロ & 乱流モデルの数値条件を悪化。主発散原因とは別。 & $k=10^{-4}$、$\omega=1$へ変更。\done \\
-大形状でmesh肥大 & unstructured細分化が形状scaleに追随してcell数増大。 & structuredへ一本化し、旧版をarchive。\done \\
-\code{potentialFoam}が全件SIGFPE & 未初期化の入口BCにより全域$U=0$のまま\code{-writep}の流向filterを評価。 & \code{-initialiseUBCs}を追加し、失敗をfatal化。実meshで検証済み。\done \\
-\code{simpleFoam}が常に10,000反復 & 収束済みでもendTimeまで継続。 & 保守的\code{residualControl}を追加。目的値感度は\pending \\
-粒子がcell境界付近で停滞 & wedge drift、境界chattering、短すぎるtracking horizon。 & analytic tracking、補正、設計別horizon。\done \\
-点粒子判定が有限粒径を無視 & 中心軌道だけでは壁近傍を通る粒子の直接さえぎりを落とす。 & finite-radius CFOを実装。cluster/shard検証は\pending \\
-報告書が時系列不明・重複 & 調査ごとのMarkdown、TeX、ログが並立。 & 本書へ統合し、根拠別冊以外を整理。\done \\
-\bottomrule
-\end{longtable}
-
-\section{現状の信頼度}
+\section{ファイルの役割}
 
 \begin{center}
-\begin{tabularx}{\textwidth}{p{43mm}p{24mm}X}
+\begin{tabularx}{\textwidth}{p{56mm}X}
 \toprule
-項目 & 状態 & 判断 \\
+場所 & 本版での役割 \\
 \midrule
-pipelineの構成 & \done & CFD、粒子、集計、MOBO、分散dispatcherがコード化済み。 \\
-CFD発散guard & \done & 異常場を粒子段へ渡さない。 \\
-圧力緩和修正 & \done & 同一mesh 3ケースのA/Bで有効。 \\
-structured mesh production & \done & 正本を一本化し、edge 12/12、random 10/10、実solver smokeに合格。 \\
-\code{potentialFoam}修正 & \done & structured実meshでPhi/$p$を解き、SIGFPEなしで終了。 \\
-\code{residualControl} & \pending & 実solverで構文・100反復を確認。粒子目的値の閾値感度は未確認。 \\
-有限半径CFO単体 & \done & v2406 build/load、強制1000接触、unit testまで確認。 \\
-有限半径4 shard & \todo & ローカル環境ではMPI/PMIx制約により未確認。 \\
-有限半径全host & \todo & hostごとのABI buildとsmall batchが必要。 \\
-旧観測との分離 & \done & 新version/campaign、別directory、baseline 0へ変更。 \\
-有限半径版の新seed & \todo & 旧代表点を新手法で再計算する必要がある。 \\
-ライブcampaign状態 & \todo & coordinator正本のstatus取得が必要。 \\
+\code{bo\_loop.py}, \code{mobo.py} & 手動操作、候補生成、観測評価、多目的BO。 \\
+\code{bo\_config.json} & 共通の計算条件とcampaign設定。 \\
+\code{site.env.example} & 利用者固有設定の雛形。\code{site.env}はGit管理外。 \\
+\code{base/} & structuredメッシュとCFDテンプレート。 \\
+\code{baseparticle/} & 粒子追跡、有限半径接触、集計のテンプレート。 \\
+\code{vendor/} & 粒子solverのbuild用ソースとライセンス。 \\
+\code{tools/} & 設定診断、solver buildなどの補助。 \\
+\code{tests/} & 軽量なソース回帰テスト。 \\
+\code{reports/} & 本書のTeX/PDF正本。 \\
+\code{campaigns/} & 実行時のcase・ログ・観測。Git管理外。 \\
 \bottomrule
 \end{tabularx}
 \end{center}
 
-\section{次に必要な作業}
-
-\subsection{P0: 次の本番計算より前}
-
-\begin{enumerate}
-  \item \textbf{旧campaignをfreezeする。} XEON6のcoordinatorを正本として、実行中・投入済み・
-    未回収ケース、観測件数、停止理由を取得する。新候補が継続投入されている場合は、
-    version方針が決まるまで提案を止める。
-  \item \textbf{active versionの分離を維持する。} 現在は
-    \nolinkurl{central_target_d10um_mobo_v2_structured_finite_radius}、baseline 0へ変更済みである。
-    今後もmesh種別、finite-radius係数、粒子solver/source revisionをmetadataへ記録する。
-  \item \textbf{各hostでcustom libraryをbuildする。} binary copyではなく、各hostの
-    solverと同じOpenFOAM環境で\code{baseparticle/build\_custom.sh}を実行する。
-  \item \textbf{有限半径の基準検証を行う。} 同一caseで\code{radiusFactor=0}対0.5、
-    serial対4 shard、時間刻み、meshを比較する。粒子収支、重複eventなし、
-    $|\mathrm{center-wall}|\simeq d/2$を合格条件とする。
-  \item \textbf{新seedを作る。} 旧Pareto点、代表点、wall沈着が多い点、粒径感度が高い点を
-    有限半径法で再計算する。旧1,209件は比較用履歴として保持し、新GPへ直接混ぜない。
-  \item \textbf{structured meshをversionへ記録する。} 選択肢には戻さず、generator revisionを
-    campaign metadataへ固定する。
-\end{enumerate}
-
-\subsection{P1: 信頼性と計算費用}
-
-\begin{enumerate}
-  \item structured代表caseで流量、圧力損失、$U$場、粒子fateの再現性を確認する。
-  \item residual停止点と3000/5000/10000反復の粒子評価を比較し、現在の
-    $10^{-5}/10^{-4}/10^{-5}$閾値を確定する。
-  \item residual条件とは別に、continuity errorや$|U|$の発散watchdogを追加する。
-  \item \code{checkMesh -allGeometry -allTopology}のproduction gateを定義する。
-  \item small finite-radius MOBO batchを動かし、dispatcher回収、fate集計、objective version
-    filter、停止条件をend-to-endで検証する。
-\end{enumerate}
-
-\subsection{P2: 物理モデルの拡張}
-
-\begin{itemize}
-  \item 0.1--7\,$\mu$mの範囲でBrownian/random forceおよび乱流分散の寄与を比較する。
-  \item 最終Pareto候補のmesh・粒子時間刻み独立性を確認する。
-  \item 高フィデリティ計算または実験と比較し、低フィデリティmodelのbiasを定量化する。
-  \item 必要性が確認された場合のみ、堆積層成長、粒子間相互作用、二方向連成を別versionで
-    導入する。
-\end{itemize}
-
-有限半径とCFD停止条件を同じ検証batchで同時に変えると、結果差の原因を分離できない。
-structured meshを固定したうえで変更を一つずつA/Bし、そのたびにmethod versionと設定を
-保存する。
-
-\section{再現・確認コマンド}
-
-\begin{verbatim}
-# 利用者ごとの初回設定（site.envはGit管理外）
-cp site.env.example site.env
-${EDITOR:-vi} site.env
-python3 tools/check_site_config.py --config bo_multihost_config.json
-
-# finite-radius library（実行solverと同じOpenFOAM環境で）
-source /usr/lib/openfoam/openfoam2406/etc/bashrc
-baseparticle/build_custom.sh
-
-# unit tests
-python3 -m unittest discover -s tests -v
-
-# template設定
-foamDictionary baseparticle/system/controlDict -entry libs -value
-foamDictionary baseparticle/constant/kinematicCloudProperties \
-  -entry cloudFunctions.finiteRadiusWall.radiusFactor -value
-
-# coordinatorのライブ状態（XEON6で実行）
-python tools/bo_multihost.py --config bo_multihost_config.json status
-\end{verbatim}
-
-有限半径validationでは、設定値だけでなく、生成された
-\nolinkurl{finiteRadiusDeposition*.dat}と\nolinkurl{particle_fates_all.csv}の件数・ID・patchを
-照合する。
-
-\section{文書・証跡の管理方針}
-
-今後のreport正本は本書\code{ajp\_project\_status\_ja.tex/pdf}とする。CFD障害の再検証に
-必要な別冊\code{cfd\_failure\_diagnosis\_ja.tex/pdf}、その入力CSVと図だけを残す。新しい
-調査を行う場合、日々のraw logを恒久reportとして増やさず、結論・条件・根拠fileを本書
-または明確な別冊TeXへ反映する。
-
-raw solver log、LaTeX中間生成物、同一内容のMarkdown/PDF、採用しない旧図は再生成可能な
-作業物としてreport treeに残さない。数値条件を変更した際は、コードだけでなく本書の
-更新日、method version、検証表を同時に更新する。
-
-\code{tests/}は軽量なソース回帰テスト群であり、削除対象ではない。
-\code{test\_cases/}はunit testではなく、mesh/solver検証で生成される大容量OpenFOAM caseの
-出力先である。2026年7月分の26組、計2.9\,GBは
-\nolinkurl{archive/test_cases_202607/}へ退避し、active側には用途説明だけを残した。
-旧config 6件と旧移行script 2件も\nolinkurl{archive/configs/}および
-\nolinkurl{archive/tools/}へ退避した。
-さらに、現行multi-host BOから参照されない旧手動pipeline 10件と旧診断tool 4件を
-\nolinkurl{archive/legacy_manual_pipeline_202607/}および
-\nolinkurl{archive/tools/legacy_202607/}へ退避した。active rootにはBO本体・設定・templateへの
-入口だけを置き、旧serial粒子runnerと旧mesh generatorはcaseへコピーしない。
-利用者名と秘密鍵名を固定していた旧SSH configも同archiveへ退避し、active dispatcherは
-Git管理外の\code{site.env}と共有host addressから接続先を構成する。
-
-\section{当面の完了条件}
-
-次のfinite-radius本番campaignを開始できる条件は、次の全項目である。
-
-\begin{itemize}
-  \item 旧campaignの投入がfreezeされ、観測snapshotが保存されている。
-  \item 新method/objective versionが設定され、新campaign directoryが旧履歴と分離されている。
-  \item 4 hostすべてで対応ABIのcustom libraryがbuild・loadできる。
-  \item radius 0/0.5、serial/4 shard、粒子収支、接触距離のvalidationが合格する。
-  \item structured generator revisionが固定され、少数caseでCFDと粒子の再現確認が完了する。
-  \item residual停止と固定反復の目的値差が許容範囲内である。
-  \item 旧代表点の再計算から新seedが作られ、旧点粒子観測と分離されている。
-\end{itemize}
-
-この条件を満たすまでは、現状を「有限半径機能は実装済み、production campaignへの移行は
-未完了」と表現するのが正確である。
+常駐dispatcher、複数ホスト設定、旧資料と\code{archive/}は自動版ブランチで参照する。
+大容量の生成case、個人設定、LaTeX中間生成物はGitHubへ登録しない。
 
 \end{document}

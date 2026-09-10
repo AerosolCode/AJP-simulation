@@ -1,64 +1,54 @@
 #!/usr/bin/env python3
-"""Resolve and display the per-user AJP cluster configuration."""
-
-from __future__ import annotations
+"""Check local manual-BO settings without submitting a job or connecting by SSH."""
 
 import argparse
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
-import bo_multihost
+from site_config import load_site_env
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="bo_multihost_config.json")
-    parser.add_argument(
-        "--local-tools",
-        action="store_true",
-        help="also check commands and paths on the current machine",
-    )
+    parser.add_argument("--local-tools", action="store_true", help="check Python modules, OpenFOAM path and Slurm")
     args = parser.parse_args(argv)
-
-    site_path = bo_multihost.load_site_env()
-    config = bo_multihost.load_dispatch_config(args.config)
-    master_python = os.environ.get("AJP_MASTER_PYTHON", "python3")
-
+    try:
+        site_path = load_site_env()
+    except ValueError as error:
+        print("ERROR:", error)
+        return 1
     errors = []
     if not site_path.is_file():
-        errors.append("site.env is missing; copy site.env.example first")
-
+        errors.append("copy site.env.example to site.env and edit it first")
+    python = os.environ.get("AJP_PYTHON_BIN", "python3")
+    foam = os.environ.get("AJP_OPENFOAM_BASHRC", "/usr/lib/openfoam/openfoam2406/etc/bashrc")
     print("site_env:", site_path)
-    print("master_python:", master_python)
-    print("campaign:", config["campaign"])
-    print("local_workdir:", config["workdir"])
-    for host in config["hosts"]:
-        worker_root = Path(host["worker_root"])
-        target = "local" if host["mode"] == "local" else host["ssh_target"]
-        if not worker_root.is_absolute():
-            errors.append("worker root is not absolute for %s" % host["name"])
-        if host["mode"] == "ssh" and host["ssh_user"].startswith("student_"):
-            errors.append("SSH user is still a placeholder for %s" % host["name"])
-        print("host %s: mode=%s target=%s slots=%s worker_root=%s campaign_root=%s" % (
-            host["name"],
-            host["mode"],
-            target,
-            host["slots"],
-            host["worker_root"],
-            host["campaign_root"],
-        ))
-
+    print("python:", python)
+    print("OpenFOAM bashrc:", foam)
+    print("particle solver:", os.environ.get("AJP_PARTICLE_SOLVER") or "aerosolDynamicsFoam from OpenFOAM PATH")
+    print("Slurm nodelist:", os.environ.get("AJP_SLURM_NODELIST") or "scheduler selection")
     if args.local_tools:
-        for command in (master_python, "ssh", "rsync", "sbatch"):
-            found = Path(command).is_file() if "/" in command else shutil.which(command)
-            print("local_tool %s: %s" % (command, "OK" if found else "MISSING"))
-            if not found:
-                errors.append("local tool is missing: %s" % command)
-
+        if not Path(foam).is_file():
+            errors.append("OpenFOAM bashrc not found: " + foam)
+        for command in (python, "squeue", "sbatch"):
+            if not shutil.which(command):
+                errors.append("command not found: " + command)
+        if shutil.which(python):
+            result = subprocess.run([python, "-c", "import numpy, gmsh"], capture_output=True, text=True)
+            if result.returncode:
+                errors.append("Python numpy/gmsh import failed: " + result.stderr.strip())
+        solver = os.environ.get("AJP_PARTICLE_SOLVER")
+        if solver and not (shutil.which(solver) or (Path(solver).is_file() and os.access(solver, os.X_OK))):
+            errors.append("configured particle solver is not executable: " + solver)
+        library = Path(__file__).resolve().parents[1] / "baseparticle/custom/finiteRadiusDeposition/lib/libfiniteRadiusDeposition.so"
+        if not library.is_file():
+            errors.append("finite-radius library missing; run tools/build_solver.sh under the execution OpenFOAM environment")
     for error in errors:
         print("ERROR:", error)
-    return 1 if errors else 0
+    print("This checks local configuration only; solver/MPI execution must be validated on the target host.")
+    return int(bool(errors))
 
 
 if __name__ == "__main__":

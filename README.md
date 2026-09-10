@@ -1,183 +1,120 @@
-# AJP-simulation
+# AJP-simulation — 手動BO版
 
-> **Start here / 最初に読む文書:** 現行手法、開発経緯、有限半径のさえぎり、完了事項、
-> 次の作業は [総合現状・計算手法・移行計画（PDF）](reports/ajp_project_status_ja.pdf) に
-> 集約しています。編集用正本は
-> [TeX source](reports/ajp_project_status_ja.tex) です。
+`main` は、候補生成・CFD投入・粒子計算投入・結果回収・次候補生成を、利用者が一段ずつ実行する版です。AJPノズルをstructuredメッシュ、OpenFOAMの定常流れ場、有限半径粒子の壁面さえぎりで評価します。
 
-An OpenFOAM-based CFD and particle-tracking simulation pipeline for evaluating AJP (Aerosol Jet Printing) nozzles. It runs many nozzle geometries/conditions (cases) in parallel on a SLURM cluster to obtain evaluation metrics such as deposition efficiency and overspray.
+計算手法、これまでの変更、検証状況は [日本語ガイド（PDF）](reports/ajp_project_status_ja.pdf) にまとめています。編集用正本は [TeX](reports/ajp_project_status_ja.tex) です。
 
-Currently this pipeline is operated as the **low-fidelity** leg of a multi-fidelity Bayesian optimization framework (a separate high-fidelity pipeline is run in parallel).
+## 手動版と自動版を使い分ける
 
-## One-time setup for each user
+| ブランチ | 運用 |
+| --- | --- |
+| `main` | 手動で各段階を実行する。本READMEの対象 |
+| `feature/structured-finite-radius-mobo-v2` | 常駐dispatcherによる複数ホストへの自動投入・回収・BO反復 |
 
-The shared campaign files do not contain a Linux login name or a user-specific
-home-directory path. After cloning the repository on XEON6, each user creates one
-local file:
+両方を運用する場合は、別ディレクトリへcloneします。実行中のディレクトリでブランチを切り替えると、ジョブが読むスクリプトも切り替わるためです。
 
 ```bash
+git clone --branch main \
+  git@github.com:AerosolCode/AJP-simulation.git AJP-manual
+git clone --branch feature/structured-finite-radius-mobo-v2 \
+  git@github.com:AerosolCode/AJP-simulation.git AJP-auto
+```
+
+手動版の既定出力先は `campaigns/manual_structured_finite_radius/` です。自動版のcampaignと観測CSVを共有しないでください。自動版の設定・運用手順・旧資料は自動版ブランチに残しています。
+
+## 学生・実行環境ごとの初回設定
+
+学生本人のSSHユーザーで計算用クラスタへログインし、その環境のclone内で操作します。手動版にはホスト間SSHの自動制御はありません。利用者固有の設定は [site.env.example](site.env.example) をコピーして編集します。自動版とは設定項目が異なるため、手動版の雛形から作ってください。
+
+```bash
+cd AJP-manual
 cp site.env.example site.env
 ${EDITOR:-vi} site.env
-python3 tools/check_site_config.py --config bo_multihost_config.json
+source ./site.env
+"$AJP_PYTHON_BIN" tools/check_site_config.py
 ```
 
-Only the following site values normally need editing:
+| 設定 | 指定するもの |
+| --- | --- |
+| `AJP_PYTHON_BIN` | NumPy・Gmshを使えるPython。計算ノードでも利用できる絶対パスを推奨 |
+| `AJP_OPENFOAM_BASHRC` | 使用するOpenFOAMの `etc/bashrc` |
+| `AJP_PARTICLE_SOLVER` | 粒子solverの実行ファイル。空ならOpenFOAM環境のPATHから探索 |
+| `AJP_SLURM_NODELIST` | 投入先node。空ならSlurmに選択を任せる |
+| `AJP_WORKER_ENV` | 通常は空。以前の `worker-env.sh` を読み込まない |
 
-- `AJP_MASTER_PYTHON` — Python used by the XEON6 coordinator
-- `AJP_SSH_USER_XEON1`, `AJP_SSH_USER_XEON4`, `AJP_SSH_USER_XEON5` —
-  SSH login name for each remote host; these may all be different
-- `AJP_WORKER_ROOT_XEON6`, `AJP_WORKER_ROOT_XEON1`,
-  `AJP_WORKER_ROOT_XEON4`, `AJP_WORKER_ROOT_XEON5` — the absolute per-user
-  worker area on each host
+`site.env` はGit管理外です。`bo_loop.py` はこの設定を読み、ジョブへ引き継ぎます。形状範囲・目的関数など、共有する計算条件は [bo_config.json](bo_config.json) で管理します。Slurmで選ばれる全ノードから、clone・Python・OpenFOAM・solverを利用できる構成にしてください。
 
-`site.env` is ignored by Git, so personal paths and login names are not committed.
-The shared [site.env.example](site.env.example), [bo_config.json](bo_config.json),
-and [bo_multihost_config.json](bo_multihost_config.json) remain unchanged when a
-different student runs the same campaign. Host addresses and scientific settings
-remain in the shared configuration.
-
-Before the first run, install the matching tracked worker template as
-`worker-env.sh` under that host's `AJP_WORKER_ROOT_<HOST>`. For example, on
-XEON1 use `tools/worker-envs/xeon1.sh`; use the correspondingly named file on the
-other hosts. The dispatcher injects the selected host's root into each Slurm
-job. The templates use `$HOME` and `$AJP_WORKER_ROOT`, but OpenFOAM paths are
-host-specific and must be checked whenever the cluster software changes. Build
-`finiteRadiusDeposition` separately under each host's solver environment.
-
-## Pipeline overview
-
-1. **Candidate generation and dispatch** — [bo_loop.py](bo_loop.py) / [tools/bo_multihost.py](tools/bo_multihost.py)
-   The constrained multi-objective BO creates each `case_XXXX` from [base/](base/) and dispatches independent Slurm jobs to the four configured hosts.
-
-2. **CFD** — [base/run.sh](base/run.sh)
-   Production always uses the structured [mesh generator](base/meshGen2.py). The former unstructured generator is archived at [archive/mesh/meshGen2_unstructured.py](archive/mesh/meshGen2_unstructured.py). The flow sequence is structured mesh → `gmshToFoam` → boundary conditions → `potentialFoam -initialiseUBCs -writep` → `simpleFoam`. `residualControl` can stop converged cases before the 10,000-iteration ceiling.
-
-3. **Particle tracking** — [baseparticle/loopaerosolDynamics.sh](baseparticle/loopaerosolDynamics.sh)
-   After CFD completion, the coordinator copies [baseparticle/](baseparticle/) and submits four replicated-mesh particle shards. The template loads `finiteRadiusDeposition`, preserves the wedge mesh, and stops at 95% resolved parcels or the case-specific horizon `min(5 s, max(0.5 s, 3*T_transit))`.
-
-4. **Collection and next proposal**
-   The coordinator retrieves `particle_fates_all.csv`, evaluates the three objectives and two constraints, updates `bo_observations.csv`, and proposes the next constrained qLogNEHVI batch.
-
-## Bayesian optimization loop
-
-[bo_loop.py](bo_loop.py) and [tools/bo_multihost.py](tools/bo_multihost.py) provide the closed-loop low-fidelity BO driver. XEON6 runs the persistent coordinator:
-
-Prepare a fresh initial design without submitting jobs:
+必要なPythonパッケージとsolverを準備します。OpenFOAMとSlurm自体はクラスタに導入済みであることが前提です。
 
 ```bash
-python3 tools/bo_multihost.py --config bo_multihost_config.json \
-  init --initial-batch 32 --prepare-only
+"$AJP_PYTHON_BIN" -m pip install numpy gmsh
+bash tools/build_solver.sh "$AJP_OPENFOAM_BASHRC" \
+  "$PWD/vendor/aerosolDynamicsFoam"
+"$AJP_PYTHON_BIN" tools/check_site_config.py --local-tools
 ```
 
-On XEON6, from the repository clone:
+このbuildは同梱の粒子solverと `finiteRadiusDeposition` ライブラリを作ります。実行時と同じOpenFOAM・利用者環境でbuildしてください。32件以上の有効観測からBOを提案する前に、追加の依存関係も導入します。
 
 ```bash
-./tools/start_bo_multihost.sh
-python3 tools/bo_multihost.py --config bo_multihost_config.json status
+"$AJP_PYTHON_BIN" -m pip install -r requirements-mobo.txt
 ```
 
-It prepares cases, submits CFD/particle jobs, collects `particle_fates_all.csv`, writes `bo_observations.csv`, and proposes asynchronous candidates with constrained BoTorch `qLogNEHVI`. The three objectives are target capture fraction, target precision, and target-centered deposition compactness. Resolved fraction and nozzle-wall deposition are feasibility constraints. XEON6 centrally coordinates independent Slurm workers on XEON6, XEON1, XEON4, and XEON5. The dispatcher has finite evaluation-budget and Pareto-hypervolume stagnation termination conditions. Install the CPU candidate-generation dependencies with `python -m pip install -r requirements-mobo.txt`. See the [current Japanese report](reports/ajp_project_status_ja.pdf) for the exact method, validation status, and operating cautions.
+## 一段ずつ実行する
 
-## Directory structure
-
-- `base/` — CFD case template (mesh generation, boundary conditions, solver settings)
-- `baseparticle/` — particle-tracking case template
-- `bo_config.json`, `bo_multihost_config.json` — active fresh-campaign configuration
-- `site.env.example` — tracked per-user configuration template; `site.env` is ignored
-- `tests/` — source-level regression tests; keep and run these
-- `test_cases/` — disposable/generated OpenFOAM validation output
-- `tools/` — active runtime, host setup, and validation utilities
-- `archive/` — pre-reset configuration, legacy scripts, and generated-case evidence
-- `archive/mesh/` — archived unstructured mesh generator; not used in production
-
-## License
-
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
-
----
-
-# AJP-simulation（日本語版）
-
-AJP（Aerosol Jet Printing）ノズルの評価を目的とした、OpenFOAMベースのCFD・粒子追跡シミュレーションパイプラインです。SLURMクラスタ上で多数のノズル形状・条件（ケース）を並列に実行し、堆積効率やオーバースプレーなどの評価指標を得ることを目指しています。
-
-現状はマルチフィデリティ・ベイズ最適化フレームワークの**低フィデリティ**計算として運用しています（高フィデリティ計算は別途並行して実行）。
-
-## 利用者ごとの初回設定
-
-共有するcampaign設定には、Linuxのユーザー名や利用者固有のhome directoryを直接書きません。
-XEON6でrepositoryをcloneしたあと、各利用者がローカル設定を1つだけ作成します。
+以下はclone直下で実行します。まず初期候補32件を生成し、試すケースを選びます。`init` と `suggest` は候補を作るだけです。
 
 ```bash
-cp site.env.example site.env
-${EDITOR:-vi} site.env
-python3 tools/check_site_config.py --config bo_multihost_config.json
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json init --initial-batch 32
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+
+# 投入内容を確認してから、選択したケースのCFDを投入
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  submit-cfd --cases case_0000 case_0001 --dry-run
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  submit-cfd --cases case_0000 case_0001
 ```
 
-通常、変更するのは次の利用者固有値だけです。
-
-- `AJP_MASTER_PYTHON` — XEON6 coordinatorが使うPython
-- `AJP_SSH_USER_XEON1`、`AJP_SSH_USER_XEON4`、`AJP_SSH_USER_XEON5` —
-  remote hostごとのSSH login名。3台で異なる値も指定可能
-- `AJP_WORKER_ROOT_XEON6`、`AJP_WORKER_ROOT_XEON1`、
-  `AJP_WORKER_ROOT_XEON4`、`AJP_WORKER_ROOT_XEON5` — hostごとの利用者用worker領域の絶対path
-
-`site.env`はGit管理外なので、個人のpathやlogin名をcommitしません。利用者が変わっても、
-共有する[site.env.example](site.env.example)、[bo_config.json](bo_config.json)、
-[bo_multihost_config.json](bo_multihost_config.json)は変更しません。host addressと計算条件は
-共有設定に残します。
-
-初回実行前に、各hostで対応する`tools/worker-envs/<host>.sh`を、そのhostの
-`AJP_WORKER_ROOT_<HOST>`直下へ`worker-env.sh`として配置します。dispatcherは選択したhostの
-worker rootを各Slurm jobへ渡します。template中の利用者pathは`$HOME`と`$AJP_WORKER_ROOT`
-から決まりますが、OpenFOAM pathはhost固有なので、cluster softwareの更新時には確認が
-必要です。`finiteRadiusDeposition`は各hostのsolver環境で個別buildします。
-
-## パイプライン概要
-
-1. **候補生成・分散投入** — [bo_loop.py](bo_loop.py) / [tools/bo_multihost.py](tools/bo_multihost.py)
-   制約付き多目的BOが[base/](base/)から`case_XXXX`を作り、設定された4ホストの独立Slurmへ投入します。
-
-2. **CFD本体** — [base/run.sh](base/run.sh)
-   productionでは常にstructured版の [meshGen2.py](base/meshGen2.py) を使います。旧unstructured版は [archive/mesh/](archive/mesh/) に退避済みです。structured mesh → `gmshToFoam` → 境界条件生成 → `potentialFoam -initialiseUBCs -writep` → `simpleFoam` の順に実行し、収束時は`residualControl`、未収束時は最大10,000反復で停止します。
-
-3. **粒子追跡** — [baseparticle/loopaerosolDynamics.sh](baseparticle/loopaerosolDynamics.sh)
-   CFD完了後、coordinatorが[baseparticle/](baseparticle/)をコピーし、複製mesh上の4 particle shardを投入します。有限半径さえぎりをloadし、wedgeを保持したまま、95%解決またはケース別上限`min(5 s, max(0.5 s, 3*T_transit))`まで追跡します。
-
-4. **回収・次候補提案**
-   coordinatorが`particle_fates_all.csv`を回収し、3目的2制約を評価して`bo_observations.csv`を更新し、制約付きqLogNEHVIで次batchを提案します。
-
-## ベイズ最適化ループ
-
-[bo_loop.py](bo_loop.py) と [tools/bo_multihost.py](tools/bo_multihost.py) が低フィデリティ計算用の閉ループ BO を構成します。XEON6で常駐コーディネーターを起動・確認します。
-
-ジョブを投入せず、新規初期設計だけを準備します。
+Slurmの `squeue -u "$USER"`、`status`、各caseのログで終了を確認します。CFDが成功したケースを選んで、粒子計算へ進めます。残差停止した場合も、そのCFDの最新時刻の流れ場を使います。
 
 ```bash
-python3 tools/bo_multihost.py --config bo_multihost_config.json \
-  init --initial-batch 32 --prepare-only
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  submit-particles --cases case_0000 case_0001 --dry-run
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  submit-particles --cases case_0000 case_0001
+
+# 粒子計算の終了後、結果を観測CSVへ反映
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+  collect --cases case_0000 case_0001
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
 ```
 
-XEON6上でrepositoryのdirectoryへ移動して実行します。
+同じ手順で残りの初期候補を評価します。結果・計算費用を確認して、次の8件を生成します。
 
 ```bash
-./tools/start_bo_multihost.sh
-python3 tools/bo_multihost.py --config bo_multihost_config.json status
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json suggest --batch-size 8
 ```
 
-ケース作成、CFD/粒子追跡投入、`particle_fates_all.csv` の回収、`bo_observations.csv` の更新、制約付きqLogNEHVIによる次候補生成までを行います。3目的はtarget捕集率、target precision、target中心compactness、2制約は解決率とノズル壁面沈着率です。XEON6がマスターとなり、XEON6、XEON1、XEON4、XEON5の独立Slurmへケースを配分して一元管理します。数式、有限半径のさえぎり、検証状況、次作業は [現行総合報告](reports/ajp_project_status_ja.pdf) を参照してください。
+有効観測が32件未満なら空間充填maximin、32件以上なら制約付き多目的BO（qLogNEHVI）を使います。次に投入するケース、再試行、次バッチへ進む時点、計算終了は利用者が判断します。
 
-## ディレクトリ構成
+`status` が `cfd_failed` または `particle_failed` を示したらログを確認します。再試行する場合は、回収前に原因を修正して該当段階の `*_FAILED` 印だけを取り除いてから再投入します。失敗として評価に残す場合は `collect` します。強制終了では失敗印が残らない場合もあるため、Slurmの `sacct` でも確認してください。`squeue` を確認できないときは重複投入を避けるため投入を停止します。
 
-- `base/` — CFDケースのテンプレート（メッシュ生成・境界条件・ソルバー設定）
-- `baseparticle/` — 粒子追跡ケースのテンプレート
-- `bo_config.json`, `bo_multihost_config.json` — 新規campaign用の現行設定
-- `site.env.example` — 利用者固有設定の雛形。コピー後の`site.env`はGit管理外
-- `tests/` — 保持・実行すべきソース回帰テスト
-- `test_cases/` — 再生成可能なOpenFOAM検証ケースの出力先
-- `tools/` — 現行runtime、host構築、検証用utility
-- `archive/` — reset前の設定、旧script、生成ケース証跡
-- `archive/mesh/` — 旧unstructured mesh生成器（productionでは不使用）
+## 残しているファイル
 
-## ライセンス
+| 場所 | 用途 |
+| --- | --- |
+| `bo_loop.py`, `mobo.py`, `bo_config.json` | 手動操作、候補提案、評価、計算条件 |
+| `base/` | structuredメッシュとCFDケースのテンプレート |
+| `baseparticle/` | 粒子追跡・さえぎり・集計のテンプレート |
+| `vendor/` | buildに必要な粒子solverのソースとライセンス |
+| `tools/` | 利用者設定の確認、solver buildなどの補助 |
+| `tests/` | ソースの回帰テスト。大容量の計算結果ではない |
+| `reports/` | 本版のTeX/PDFガイド |
+| `campaigns/` | 実行時に作るcase・ログ・観測。Git管理外 |
 
-このプロジェクトは [GNU General Public License v3.0](LICENSE) の下で公開されています。
+回帰テストは `python3 -m unittest discover -s tests -v` で実行できます。実際のCFD・粒子物理の検証は別途必要です。有限半径モデルは固定壁への直接さえぎりを扱い、堆積層の成長や粒子同士の衝突は扱いません。クラスタ上の並列実行、メッシュ・時間刻み・残差停止の感度を少数ケースで確認してから本計算へ進めてください。
+
+## English
+
+`main` is the manual Bayesian-optimization workflow: explicitly generate candidates, submit selected CFD cases, submit particle tracking after CFD succeeds, collect results, and request another batch. The automated multi-host workflow remains on `feature/structured-finite-radius-mobo-v2`. Use separate clones and campaign directories to operate both. Copy `site.env.example` to the Git-ignored `site.env` and configure your local Python, OpenFOAM, particle solver, and Slurm node selection. See the commands above and the Japanese PDF guide for the operating procedure and validation limits.
+
+Licensed under [GNU GPL v3.0](LICENSE).

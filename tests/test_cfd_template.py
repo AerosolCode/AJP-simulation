@@ -11,9 +11,7 @@ class CfdTemplatePolicyTest(unittest.TestCase):
         self.assertIn("Production structured/swept mesh generator", production)
         self.assertFalse((REPO_ROOT / "base" / "meshGen2_structured.py").exists())
 
-        archived = REPO_ROOT / "archive" / "mesh" / "meshGen2_unstructured.py"
-        self.assertTrue(archived.is_file())
-        self.assertIn("Archived unstructured mesh generator", archived.read_text())
+        self.assertFalse((REPO_ROOT / "base" / "meshGen2_unstructured.py").exists())
 
     def test_potential_foam_initialises_flow_rate_boundaries_and_is_required(self):
         run_script = (REPO_ROOT / "base" / "run.sh").read_text()
