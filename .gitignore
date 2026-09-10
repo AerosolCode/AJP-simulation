@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+
+# OpenFOAM custom-library build products
+baseparticle/custom/finiteRadiusDeposition/Make/linux*/
+baseparticle/custom/finiteRadiusDeposition/lnInclude/
+baseparticle/custom/finiteRadiusDeposition/lib/*.so
+
+# Generated report/LaTeX intermediates
+reports/_build/
+
+# Generated validation and campaign data (keep only documentation in Git)
+test_cases/*
+!test_cases/README.md
+archive/test_cases_*/*
+!archive/test_cases_*/README_ARCHIVE.md
+campaigns/
+
+# Per-user cluster paths and login name
+site.env

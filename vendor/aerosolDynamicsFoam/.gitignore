@@ -1,0 +1,9 @@
+Make/linux64*
+lagrangian/*/Make/linux*
+lagrangian/*/lnInclude/
+test/
+testImpactor/
+figures/
+benchmarkResults.*
+!benchmarkResults.tex
+!benchmarkResults.pdf

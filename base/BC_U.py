@@ -1,4 +1,4 @@
-import numpy as np
+from __future__ import annotations
 
 def load_kv(path: str) -> dict[str, str]:
     d = {}
@@ -15,10 +15,11 @@ p = load_kv("params.dat")
 
 Qsheath_Lmin = float(p["Qsheath_lpm"])
 Qaerosol_Lmin = float(p["Qaerosol_lpm"])
+wedge_deg = float(p.get("wedge_deg", "5.0"))
 
 # L/min → m³/s → scaling
 def convert(Q_Lmin):
-    return Q_Lmin * 1e-3 / 60.0 * 5 / 360
+    return Q_Lmin * 1e-3 / 60.0 * wedge_deg / 360
 
 Qsheath = convert(Qsheath_Lmin)
 Qaerosol = convert(Qaerosol_Lmin)
@@ -56,7 +57,7 @@ footer = '''
         type            pressureInletOutletVelocity;
     	value		    $internalField;
     }
-    "(wall.*)"
+    "(wall.*|defaultFaces)"
     {
         type            noSlip;
     }

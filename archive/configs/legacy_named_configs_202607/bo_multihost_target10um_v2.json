@@ -1,0 +1,43 @@
+{
+  "campaign": "bo_target10um_v2",
+  "source_root": "..",
+  "bo_config": "bo_config_target10um_v2.json",
+  "workdir": "../campaigns/bo_target10um_v2",
+  "remote_root": "/home/tamadate/AJP-worker/campaigns/bo_target10um_v2",
+  "hosts": [
+    {"name": "xeon6", "mode": "local", "slots": 4},
+    {"name": "xeon1", "mode": "ssh", "slots": 4},
+    {"name": "xeon4", "mode": "ssh", "slots": 4},
+    {"name": "xeon5", "mode": "ssh", "slots": 4}
+  ],
+  "cfd_env": {
+    "AJP_MAX_MESH_NODES": "120000",
+    "AJP_MAX_MESH_ELEMENTS": "360000",
+    "AJP_CFD_MAX_U_MAG": "10000"
+  },
+  "particle_env": {
+    "AJP_INJECTION_POINTS": "100",
+    "AJP_TOTAL_PARTICLES": "1000",
+    "AJP_TARGET_RATIO": "0.95",
+    "AJP_CHUNK": "0.1",
+    "AJP_MAX_TIME": "auto",
+    "AJP_MAX_TIME_FACTOR": "3.0",
+    "AJP_MAX_TIME_MIN": "0.5",
+    "AJP_MAX_TIME_MAX": "5.0",
+    "AJP_DELTA_T": "1e-4",
+    "AJP_PARALLEL_LAUNCHER": "mpirun"
+  },
+  "loop": {
+    "initial_batch": 32,
+    "batch_size": 8,
+    "max_pending": 32,
+    "sleep_seconds": 300,
+    "stop": {
+      "baseline_observations": 1209,
+      "max_new_observations": 256,
+      "min_new_observations": 96,
+      "patience": 96,
+      "min_improvement": 0.0005
+    }
+  }
+}

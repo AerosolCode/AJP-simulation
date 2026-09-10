@@ -1,0 +1,7 @@
+case,configuration,log,last_iteration,continuity_at_800,first_continuity_gt_1e3,max_local_continuity,clean_end
+case_1317,Original: p in equations,reports/cfd_failure_diagnostic/baseline/case_1317/log.simpleFoam,10000.0,456543.0,287.0,1075120000000.0,True
+case_1317,Corrected: p in fields,reports/cfd_failure_diagnostic/corrected/case_1317/simplec_standard/log.simpleFoam,800.0,0.00786859,,0.200703,True
+case_1401,Original: p in equations,reports/cfd_failure_diagnostic/baseline/case_1401/log.simpleFoam,5083.0,1266610000000000.0,177.0,8.84267e+97,False
+case_1401,Corrected: p in fields,reports/cfd_failure_diagnostic/corrected/case_1401/log.simpleFoam,800.0,0.0460925,,0.523685,True
+case_1436,Original: p in equations,reports/cfd_failure_diagnostic/baseline/case_1436/log.simpleFoam,458.0,,155.0,1.82078e+131,False
+case_1436,Corrected: p in fields,reports/cfd_failure_diagnostic/corrected/case_1436/log.simpleFoam,800.0,0.00216794,,0.208784,True

@@ -61,6 +61,13 @@ SIMPLE
 
     pRefCell  0;
     pRefValue 0;
+
+    residualControl
+    {
+        p                   1e-5;
+        U                   1e-4;
+        "(k|epsilon|omega)" 1e-5;
+    }
 }
 
 potentialFlow
@@ -70,9 +77,13 @@ potentialFlow
 
 relaxationFactors
 {
+    fields
+    {
+        p               0.3;
+    }
+
     equations
     {
-    	p		        0.3;
         U               0.7;
         k               0.7;
         "(epsilon|omega)" 0.7;

@@ -1,4 +1,4 @@
-import numpy as np
+from __future__ import annotations
 
 def load_kv(path: str):
     d = {}
@@ -36,7 +36,7 @@ FoamFile
 
 dimensions      [0 0 -1 0 0 0 0];
 
-internalField   uniform 1e-100;
+internalField   uniform 1;
 
 boundaryField
 {
@@ -50,7 +50,7 @@ footer = '''
         //inletValue	        uniform 1e-10;
     	value		        $internalField;
     }
-    "wall.*"
+    "(wall.*|defaultFaces)"
     {
         type                omegaWallFunction;
         value               $internalField;

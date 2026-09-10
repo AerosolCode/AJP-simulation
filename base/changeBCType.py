@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 
 input_file  = "constant/polyMesh/boundary"
@@ -12,7 +14,7 @@ def classify(name: str) -> tuple[str, str]:
         return ("wedge", "wedge")
 
     # walls
-    if name.startswith("wall"):
+    if name.startswith("wall") or name == "defaultFaces":
         return ("wall", "wall")
 
     # inlets/outlets (keep as patch)
