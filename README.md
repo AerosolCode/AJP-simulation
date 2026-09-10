@@ -1,33 +1,17 @@
-# AJP-simulation — 手動BO版
+# AJP-simulation — BOの実行手順
 
-`main` は、候補生成・CFD投入・粒子計算投入・結果回収・次候補生成を、利用者が一段ずつ実行する版です。AJPノズルをstructuredメッシュ、OpenFOAMの定常流れ場、有限半径粒子の壁面さえぎりで評価します。
+初期候補の生成 → CFD → 粒子計算 → 結果回収 → 次候補の生成、の順に実行します。以下のコマンドはすべてclone直下で実行してください。
 
-計算手法、これまでの変更、検証状況は [日本語ガイド（PDF）](reports/ajp_project_status_ja.pdf) にまとめています。編集用正本は [TeX](reports/ajp_project_status_ja.tex) です。
+## 1. 初回の環境設定
 
-## 手動版と自動版を使い分ける
-
-| ブランチ | 運用 |
-| --- | --- |
-| `main` | 手動で各段階を実行する。本READMEの対象 |
-| `feature/structured-finite-radius-mobo-v2` | 常駐dispatcherによる複数ホストへの自動投入・回収・BO反復 |
-
-両方を運用する場合は、別ディレクトリへcloneします。実行中のディレクトリでブランチを切り替えると、ジョブが読むスクリプトも切り替わるためです。
+自分のSSHユーザーで計算用クラスタへログインし、作業用ディレクトリにcloneします。OpenFOAMとSlurmはクラスタに導入済みであることが前提です。
 
 ```bash
 git clone --branch main \
   git@github.com:AerosolCode/AJP-simulation.git AJP-manual
-git clone --branch feature/structured-finite-radius-mobo-v2 \
-  git@github.com:AerosolCode/AJP-simulation.git AJP-auto
-```
-
-手動版の既定出力先は `campaigns/manual_structured_finite_radius/` です。自動版のcampaignと観測CSVを共有しないでください。自動版の設定・運用手順・旧資料は自動版ブランチに残しています。
-
-## 学生・実行環境ごとの初回設定
-
-学生本人のSSHユーザーで計算用クラスタへログインし、その環境のclone内で操作します。手動版にはホスト間SSHの自動制御はありません。利用者固有の設定は [site.env.example](site.env.example) をコピーして編集します。自動版とは設定項目が異なるため、手動版の雛形から作ってください。
-
-```bash
 cd AJP-manual
+
+# site.envの作成は初回だけ。各パスを自分の環境に合わせて編集
 cp site.env.example site.env
 ${EDITOR:-vi} site.env
 source ./site.env
@@ -40,41 +24,58 @@ source ./site.env
 | `AJP_OPENFOAM_BASHRC` | 使用するOpenFOAMの `etc/bashrc` |
 | `AJP_PARTICLE_SOLVER` | 粒子solverの実行ファイル。空ならOpenFOAM環境のPATHから探索 |
 | `AJP_SLURM_NODELIST` | 投入先node。空ならSlurmに選択を任せる |
-| `AJP_WORKER_ENV` | 通常は空。以前の `worker-env.sh` を読み込まない |
+| `AJP_WORKER_ENV` | 通常は空のまま |
 
-`site.env` はGit管理外です。`bo_loop.py` はこの設定を読み、ジョブへ引き継ぎます。形状範囲・目的関数など、共有する計算条件は [bo_config.json](bo_config.json) で管理します。Slurmで選ばれる全ノードから、clone・Python・OpenFOAM・solverを利用できる構成にしてください。
+`site.env` はGit管理外です。ユーザーや環境が変わったら、このファイルをその人の設定で作成してください。Slurmで選ばれる全ノードから、clone・Python・OpenFOAM・solverを利用できる構成にします。
 
-必要なPythonパッケージとsolverを準備します。OpenFOAMとSlurm自体はクラスタに導入済みであることが前提です。
+必要なPythonパッケージ、粒子solver、壁面さえぎりライブラリを準備します。buildは計算時と同じOpenFOAM・利用者環境で実行してください。
 
 ```bash
 "$AJP_PYTHON_BIN" -m pip install numpy gmsh
+"$AJP_PYTHON_BIN" -m pip install -r requirements-mobo.txt
 bash tools/build_solver.sh "$AJP_OPENFOAM_BASHRC" \
   "$PWD/vendor/aerosolDynamicsFoam"
 "$AJP_PYTHON_BIN" tools/check_site_config.py --local-tools
 ```
 
-このbuildは同梱の粒子solverと `finiteRadiusDeposition` ライブラリを作ります。実行時と同じOpenFOAM・利用者環境でbuildしてください。32件以上の有効観測からBOを提案する前に、追加の依存関係も導入します。
+新しいターミナルや再ログイン後は、clone直下で設定を読み直します。
 
 ```bash
-"$AJP_PYTHON_BIN" -m pip install -r requirements-mobo.txt
+source ./site.env
 ```
 
-## 一段ずつ実行する
+## 2. 初期候補を生成する
 
-以下はclone直下で実行します。まず初期候補32件を生成し、試すケースを選びます。`init` と `suggest` は候補を作るだけです。
+形状範囲・目的関数などの計算条件は [bo_config.json](bo_config.json) で確認・編集します。まず初期候補32件を生成します。`init` は新しい計算を始めるときに一度だけ実行します。
 
 ```bash
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json init --initial-batch 32
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+```
 
-# 投入内容を確認してから、選択したケースのCFDを投入
+既定の出力先は `campaigns/manual_structured_finite_radius/` です。この中の `bo_candidates.csv` で候補を確認できます。`init` と `suggest` は候補を生成するだけで、計算ジョブは投入しません。
+
+## 3. 選んだケースのCFDを投入する
+
+以下は `case_0000` と `case_0001` を計算する例です。`--cases` の後を実際に計算したいケース名に置き換えてください。まず `--dry-run` で投入内容を確認し、問題なければ投入します。
+
+```bash
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
   submit-cfd --cases case_0000 case_0001 --dry-run
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
   submit-cfd --cases case_0000 case_0001
 ```
 
-Slurmの `squeue -u "$USER"`、`status`、各caseのログで終了を確認します。CFDが成功したケースを選んで、粒子計算へ進めます。残差停止した場合も、そのCFDの最新時刻の流れ場を使います。
+ジョブの終了を待ち、進捗と各ケースのログでCFDの成功を確認します。
+
+```bash
+squeue -u "$USER"
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+```
+
+## 4. CFDが成功したケースの粒子計算を投入する
+
+CFDの成功を確認したケースを指定します。残差停止した場合も、CFDの最新時刻の流れ場を使います。
 
 ```bash
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
@@ -82,39 +83,34 @@ Slurmの `squeue -u "$USER"`、`status`、各caseのログで終了を確認し�
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
   submit-particles --cases case_0000 case_0001
 
-# 粒子計算の終了後、結果を観測CSVへ反映
+squeue -u "$USER"
+"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+```
+
+## 5. 結果を回収する
+
+粒子計算の終了後、結果を観測CSVへ反映します。
+
+```bash
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
   collect --cases case_0000 case_0001
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
 ```
 
-同じ手順で残りの初期候補を評価します。結果・計算費用を確認して、次の8件を生成します。
+結果は出力先の `bo_observations.csv` に保存されます。手順3〜5を繰り返し、残りの初期候補も評価します。
+
+## 6. 次の候補を生成して繰り返す
+
+回収した結果を確認し、次の8件を生成します。
 
 ```bash
 "$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json suggest --batch-size 8
 ```
 
-有効観測が32件未満なら空間充填maximin、32件以上なら制約付き多目的BO（qLogNEHVI）を使います。次に投入するケース、再試行、次バッチへ進む時点、計算終了は利用者が判断します。
+有効観測が32件未満なら空間充填maximin、32件以上なら制約付き多目的BO（qLogNEHVI）で候補を提案します。`bo_candidates.csv` で新しいケース名を確認し、そのケースについて手順3〜5を実行します。以後は手順6→3→4→5を必要な回数だけ繰り返します。`init` をやり直す必要はありません。
+
+## 計算に失敗したとき
 
 `status` が `cfd_failed` または `particle_failed` を示したらログを確認します。再試行する場合は、回収前に原因を修正して該当段階の `*_FAILED` 印だけを取り除いてから再投入します。失敗として評価に残す場合は `collect` します。強制終了では失敗印が残らない場合もあるため、Slurmの `sacct` でも確認してください。`squeue` を確認できないときは重複投入を避けるため投入を停止します。
-
-## 残しているファイル
-
-| 場所 | 用途 |
-| --- | --- |
-| `bo_loop.py`, `mobo.py`, `bo_config.json` | 手動操作、候補提案、評価、計算条件 |
-| `base/` | structuredメッシュとCFDケースのテンプレート |
-| `baseparticle/` | 粒子追跡・さえぎり・集計のテンプレート |
-| `vendor/` | buildに必要な粒子solverのソースとライセンス |
-| `tools/` | 利用者設定の確認、solver buildなどの補助 |
-| `tests/` | ソースの回帰テスト。大容量の計算結果ではない |
-| `reports/` | 本版のTeX/PDFガイド |
-| `campaigns/` | 実行時に作るcase・ログ・観測。Git管理外 |
-
-回帰テストは `python3 -m unittest discover -s tests -v` で実行できます。実際のCFD・粒子物理の検証は別途必要です。有限半径モデルは固定壁への直接さえぎりを扱い、堆積層の成長や粒子同士の衝突は扱いません。クラスタ上の並列実行、メッシュ・時間刻み・残差停止の感度を少数ケースで確認してから本計算へ進めてください。
-
-## English
-
-`main` is the manual Bayesian-optimization workflow: explicitly generate candidates, submit selected CFD cases, submit particle tracking after CFD succeeds, collect results, and request another batch. The automated multi-host workflow remains on `feature/structured-finite-radius-mobo-v2`. Use separate clones and campaign directories to operate both. Copy `site.env.example` to the Git-ignored `site.env` and configure your local Python, OpenFOAM, particle solver, and Slurm node selection. See the commands above and the Japanese PDF guide for the operating procedure and validation limits.
 
 Licensed under [GNU GPL v3.0](LICENSE).
