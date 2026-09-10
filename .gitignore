@@ -20,5 +20,5 @@ test_cases/
 archive/
 campaigns/
 
-# Per-user cluster paths and login name
+# Keep legacy local settings out of Git; the manual workflow does not load them.
 site.env

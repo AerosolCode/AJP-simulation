@@ -7,16 +7,6 @@ SCRIPT = (
     / "baseparticle"
     / "loopaerosolDynamics.sh"
 )
-KINEMATIC_PARCEL = (
-    Path(__file__).resolve().parents[1]
-    / "vendor"
-    / "aerosolDynamicsFoam"
-    / "lagrangian"
-    / "intermediate"
-    / "parcels"
-    / "Templates"
-    / "KinematicParcel"
-)
 
 
 class ParticleScriptTest(unittest.TestCase):
@@ -38,14 +28,11 @@ class ParticleScriptTest(unittest.TestCase):
         self.assertIn("U               cellPoint;", properties)
         self.assertNotIn("U               cell;", properties)
 
-    def test_wedge_drift_uses_symmetry_reflection(self):
-        header = (KINEMATIC_PARCEL / "KinematicParcel.H").read_text()
-        source = (KINEMATIC_PARCEL / "KinematicParcel.C").read_text()
-        self.assertIn("void hitWedgePatch", header)
-        self.assertIn(
-            "KinematicParcel<ParcelType>::hitWedgePatch",
-            source,
-        )
-        self.assertIn("transformProperties(I - 2.0*nf*nf);", source)
-        self.assertIn("if (isA<wedgePolyPatch>(pp))", source)
-        self.assertIn("p.transformProperties(I - 2.0*nf*nf);", source)
+    def test_finite_radius_wall_capture_remains_enabled(self):
+        properties = (SCRIPT.parent / "constant/kinematicCloudProperties").read_text()
+        self.assertRegex(properties, r"type\s+finiteRadiusDeposition;")
+        self.assertRegex(properties, r"radiusFactor\s+0\.5;")
+        self.assertRegex(properties, r"action\s+remove;")
+        self.assertIn("(wallSubstrate wallUpper wallDown wallCavity)", properties)
+        control = (SCRIPT.parent / "system/controlDict").read_text()
+        self.assertIn("$FOAM_CASE/custom/finiteRadiusDeposition/lib/libfiniteRadiusDeposition.so", control)

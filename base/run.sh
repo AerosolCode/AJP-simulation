@@ -5,7 +5,7 @@
 #SBATCH --mem=5000
 #SBATCH --time=04:00:00
 
-set -e
+set -euo pipefail
 finish_cfd()
 {
     local rc=$?
@@ -18,34 +18,20 @@ trap finish_cfd EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 echo "[run] script start"
-WORKER_ENV=${AJP_WORKER_ENV-}
-if [ -r "$WORKER_ENV" ]; then
-    # Host-specific OpenFOAM and Python/Gmsh locations.
-    source "$WORKER_ENV"
-    echo "[run] worker environment=$WORKER_ENV"
-fi
-set +u
-set +e
-source "${AJP_OPENFOAM_BASHRC:-/usr/lib/openfoam/openfoam2406/etc/bashrc}"
-source_rc=$?
-set -e
-echo "[run] source rc=$source_rc"
-echo "[run] WM_PROJECT_DIR=${WM_PROJECT_DIR:-unset}"
-echo "[run] FOAM_APPBIN=${FOAM_APPBIN:-unset}"
-if [ "$source_rc" -ne 0 ]; then
-    exit "$source_rc"
-fi
-set -euo pipefail
+# The submitting shell supplies OpenFOAM and Python through the Slurm environment.
 CFD_MAX_U_MAG=${AJP_CFD_MAX_U_MAG:-10000}
 MESH_MAX_NODES=${AJP_MAX_MESH_NODES:-120000}
 MESH_MAX_ELEMENTS=${AJP_MAX_MESH_ELEMENTS:-360000}
-PYTHON_BIN=${AJP_PYTHON_BIN:-}
-if [ -z "$PYTHON_BIN" ]; then
-    if [ -x "$HOME/.conda/envs/gmshpy/bin/python" ]; then
-        PYTHON_BIN="$HOME/.conda/envs/gmshpy/bin/python"
-    else
-        PYTHON_BIN=$(command -v python3)
+PYTHON_BIN=${AJP_PYTHON_BIN:-python3}
+for required_command in "$PYTHON_BIN" gmshToFoam potentialFoam simpleFoam postProcess; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+        echo "[run] required command unavailable: $required_command. Prepare the environment before submitting the job." >&2
+        exit 127
     fi
+done
+if ! "$PYTHON_BIN" -c 'import gmsh'; then
+    echo "[run] the selected Python must provide the gmsh module: $PYTHON_BIN" >&2
+    exit 1
 fi
 
 latest_numeric_dir()
@@ -119,7 +105,7 @@ check_mesh_size()
     fi
 }
 
-echo "[run] OpenFOAM sourced"
+echo "[run] using inherited OpenFOAM environment: ${WM_PROJECT_DIR:-PATH}"
 echo "[run] python=$PYTHON_BIN"
 echo "[run] gmsh=$(command -v gmsh || true)"
 echo "[run] gmshToFoam=$(command -v gmshToFoam || true)"

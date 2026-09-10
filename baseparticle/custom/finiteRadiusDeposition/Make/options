@@ -1,6 +1,6 @@
 EXE_INC = \
-    -I../../../vendor/aerosolDynamicsFoam/lagrangian/intermediate/lnInclude \
-    -I../../../vendor/aerosolDynamicsFoam/lagrangian/intermediate/clouds/baseClasses/kinematicCloud \
+    -I$(AJP_AEROSOL_SOURCE_DIR)/lagrangian/intermediate/lnInclude \
+    -I$(AJP_AEROSOL_SOURCE_DIR)/lagrangian/intermediate/clouds/baseClasses/kinematicCloud \
     -I$(LIB_SRC)/finiteVolume/lnInclude \
     -I$(LIB_SRC)/meshTools/lnInclude \
     -I$(LIB_SRC)/lagrangian/basic/lnInclude \
@@ -16,6 +16,7 @@ EXE_INC = \
     -I$(LIB_SRC)/faOptions/lnInclude
 
 LIB_LIBS = \
+    -L$(AJP_AEROSOL_LIBBIN) \
     -L$(FOAM_USER_LIBBIN) \
     -L$(WM_PROJECT_USER_DIR)/platforms/$(WM_OPTIONS)/lib \
     -loneWayIntermediate \

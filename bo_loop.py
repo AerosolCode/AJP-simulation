@@ -21,7 +21,6 @@ from pathlib import Path
 
 import numpy as np
 from baseparticle.cfd_fields import latest_cfd_time
-from tools.site_config import load_site_env
 
 
 DEFAULT_CONFIG = {
@@ -1371,11 +1370,13 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     init_p = sub.add_parser("init", help="initialize a fresh campaign and prepare its initial design")
-    init_p.add_argument("--initial-batch", type=int, default=32)
+    init_p.add_argument("--initial-batch", type=int, default=32,
+                        help="number of initial cases to prepare (default: 32)")
     init_p.add_argument("--dry-run", action="store_true")
 
     suggest_p = sub.add_parser("suggest", help="prepare the next batch without submitting jobs")
-    suggest_p.add_argument("--batch-size", type=int, default=8)
+    suggest_p.add_argument("--batch-size", type=int, default=8,
+                           help="number of new cases to prepare (default: 8)")
     suggest_p.add_argument("--dry-run", action="store_true")
 
     collect_p = sub.add_parser("collect", help="evaluate completed/failed cases once")
@@ -1394,7 +1395,6 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        load_site_env()
         config, config_dir = load_config(args.config)
         if args.workdir:
             config["workdir"] = args.workdir

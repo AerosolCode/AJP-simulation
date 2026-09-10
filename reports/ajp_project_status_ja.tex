@@ -27,122 +27,87 @@
 
 これまで、圧力緩和とCFD完了判定の修正、structuredメッシュへの一本化、
 \code{potentialFoam}のSIGFPE修正、\code{residualControl}の導入を行った。
-2026年9月8日に有限半径の壁面直接さえぎりを追加し、9月9日に利用者・SSH環境の設定を
-整理した。9月10日に、自動版と手動版を同時運用できるようブランチを分けた。
+2026年9月8日に有限半径の壁面直接さえぎりを追加し、9月10日に手動操作する本版を分離した。
+本版は利用者が用意した計算環境を使い、初期128条件、以降32条件ずつを評価する操作例を示す。
 
-\begin{center}
-\begin{tabularx}{\textwidth}{p{32mm}X}
-\toprule
-版 & 運用と保管内容 \\
-\midrule
-\code{main} & 本書の手動版。各段階を利用者が実行する。実行に必要なコードと本ガイドを保持。 \\
-自動版 & \nolinkurl{feature/structured-finite-radius-mobo-v2}。
-複数ホストの常駐dispatcher、自動投入・回収・反復、および旧資料を保持。
-分岐時点のcommitは\code{1a04973}。 \\
-\bottomrule
-\end{tabularx}
-\end{center}
+既定の出力先は\nolinkurl{campaigns/manual_structured_finite_radius/}である。
+過去の点粒子モデルの観測を、新しい有限半径モデルの学習へ直接混ぜない。
 
-両版は別ディレクトリへcloneする。実行中のcloneでブランチを切り替えると、ジョブが
-参照するスクリプトも変わる。手動版の既定出力先は
-\nolinkurl{campaigns/manual_structured_finite_radius/}である。自動版のcase・観測CSVを
-共有しない。過去の点粒子モデルの観測も、新しい有限半径モデルの学習へ直接混ぜない。
+\section{実行の前提}
 
-\section{利用者が変わるときの設定}
+SSH接続、Python、OpenFOAM、Slurm、粒子solverの導入と環境設定は利用者が行う。
+NumPy・Gmsh、および\code{requirements-mobo.txt}のBO依存関係が利用できる環境で、
+clone直下から操作する。実行スクリプトは準備済みの環境とPATHを利用し、環境設定ファイルを
+自動で読み込まない。Slurmが選ぶnodeでも同じ実行環境とcaseディレクトリが利用できることを前提とする。
 
-計算用クラスタには本人のSSHユーザーでログインし、そのクラスタのclone内で操作する。
-本版はホスト間SSHを制御しないため、SSHのユーザー名はログイン時に指定する。
-Python・OpenFOAMなどの利用者固有値は\code{site.env}へ集約する。
+粒子solverは外部に導入した互換\code{aerosolDynamicsFoam}を使う。
+
+外部solverには、解析的位置追跡、\code{-particleParallel}と\code{-nParticleShards}の
+オプション、wedgeでの反射処理を備えた従来手法と互換の改修版が必要であり、
+同じソースのヘッダとbuild済み\code{liboneWayIntermediate}も用意する。
+ソースを同梱しない構成でも、これらの独自改修は本手法の実行要件として維持される。
+有限半径接触libraryは、実行するsolverと同じソース・OpenFOAM環境で次のようにbuildする。
+引数は、利用者が用意したsolverソースの絶対パスへ置き換える。
 
 \begin{verbatim}
-cp site.env.example site.env
-${EDITOR:-vi} site.env
-source ./site.env
-"$AJP_PYTHON_BIN" tools/check_site_config.py
+bash baseparticle/build_custom.sh \
+  /absolute/path/to/aerosolDynamicsFoam-source
 \end{verbatim}
 
-\begin{center}
-\begin{tabularx}{\textwidth}{p{59mm}X}
-\toprule
-設定項目 & 意味 \\
-\midrule
-\code{AJP\_PYTHON\_BIN} & NumPy・Gmshが利用できるPython。計算ノードから見える絶対パスを推奨。 \\
-\code{AJP\_OPENFOAM\_BASHRC} & 使用するOpenFOAMの\code{etc/bashrc}。 \\
-\code{AJP\_PARTICLE\_SOLVER} & 粒子solverのパス。空ならOpenFOAM環境のPATHから探索。 \\
-\code{AJP\_SLURM\_NODELIST} & 投入先node。空ならSlurmが選択。 \\
-\code{AJP\_WORKER\_ENV} & 通常は空。旧\code{worker-env.sh}の読み込みを無効化。 \\
-\bottomrule
-\end{tabularx}
-\end{center}
-
-\code{site.env}はGit管理外であり、\code{bo\_loop.py}が読み込んでSlurmジョブへ渡す。
-自動版とは設定項目が異なるため、手動版の\code{site.env.example}から新しく作成する。
-共有する形状範囲・目的関数・出力先は\code{bo\_config.json}で管理する。
-Slurmが選ぶ各nodeから、clone、Python、OpenFOAMと粒子solverを利用できる必要がある。
-
-OpenFOAMとSlurmが導入された環境で、次を実行する。
-
-\begin{verbatim}
-"$AJP_PYTHON_BIN" -m pip install numpy gmsh
-bash tools/build_solver.sh "$AJP_OPENFOAM_BASHRC" \
-  "$PWD/vendor/aerosolDynamicsFoam"
-"$AJP_PYTHON_BIN" tools/check_site_config.py --local-tools
-
-# 有効観測32件以上からBO提案する前に導入
-"$AJP_PYTHON_BIN" -m pip install -r requirements-mobo.txt
-\end{verbatim}
-
-buildスクリプトは同梱粒子solverと\code{finiteRadiusDeposition}を作成する。
-実行solverと同じOpenFOAM・利用者環境でbuildする。OpenFOAMの版が異なる環境へ
-共有ライブラリのbinaryを流用しない。
+この操作は\code{finiteRadiusDeposition}をbuildする。粒子solver本体は利用者が準備する。
+OpenFOAMの版が異なる環境へ共有ライブラリのbinaryを流用しない。
+形状範囲、目的関数、出力先などの共通条件は\code{bo\_config.json}で管理する。
 
 \section{手動BOの操作手順}
 
-以下はclone直下での例である。\code{init}と\code{suggest}は候補生成だけを行い、
-ジョブを投入しない。最初は少数caseで全段階を確認する。
+以下は初期128条件、その後は1世代32条件を評価する例である。
+\code{init}と\code{suggest}は候補生成だけを行い、ジョブを投入しない。
+引数省略時の既定値は初期32件、追加8件のままであり、本手順では件数を明示する。
 
 \subsection{初期候補とCFD}
 
 \begin{verbatim}
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
-  init --initial-batch 32
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+python3 bo_loop.py --config bo_config.json init --initial-batch 128
+python3 bo_loop.py --config bo_config.json status
 
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
-  submit-cfd --cases case_0000 case_0001 --dry-run
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
-  submit-cfd --cases case_0000 case_0001
+python3 bo_loop.py --config bo_config.json submit-cfd --dry-run
+python3 bo_loop.py --config bo_config.json submit-cfd
 \end{verbatim}
 
+新しいcampaignでは\code{case\_0000}から\code{case\_0127}までが初期候補となる。
+候補は出力先の\code{bo\_candidates.csv}で確認する。\code{init}は開始時の一度だけ実行する。
 \code{--dry-run}で投入内容を確認してから実際に投入する。
+上記は投入可能な全caseを対象とする。少数caseを試す場合は、
+\code{--cases case\_0000 case\_0001}のように指定する。
 \code{squeue -u "\$USER"}、\code{status}と各caseのログを確認し、CFDの成功後に粒子へ進む。
 残差停止で10,000反復前に終了した場合も、実際の最新CFD時刻の流れ場を粒子へ渡す。
 
 \subsection{粒子追跡と回収}
 
 \begin{verbatim}
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
-  submit-particles --cases case_0000 case_0001 --dry-run
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
-  submit-particles --cases case_0000 case_0001
+python3 bo_loop.py --config bo_config.json submit-particles --dry-run
+python3 bo_loop.py --config bo_config.json submit-particles
 
 # 粒子計算の終了を確認してから回収
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
-  collect --cases case_0000 case_0001
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+python3 bo_loop.py --config bo_config.json collect
+python3 bo_loop.py --config bo_config.json status
 \end{verbatim}
 
 \code{collect}は\code{particle\_fates\_all.csv}を評価し、campaign内の
 \code{bo\_observations.csv}へ反映する。\code{--cases}を省略した回収はcampaign全体を対象とする。
-ログと評価値を確認し、同じ手順で残りの初期候補を評価する。
+ログと評価値を確認し、初期128件すべての評価、または失敗としての回収を終えてから次の世代へ進む。
 
 \subsection{次候補と終了判断}
 
 \begin{verbatim}
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
-  suggest --batch-size 8
+python3 bo_loop.py --config bo_config.json suggest --batch-size 32
 \end{verbatim}
 
+最初の追加は通常\code{case\_0128}から\code{case\_0159}までの32条件になる。
+\code{bo\_candidates.csv}で生成結果を確認し、CFD投入、粒子投入、回収を繰り返す。
+その32件の評価を終えたら再び\code{suggest --batch-size 32}を実行する。
+
+BOへ切り替える有効観測数の閾値は、世代の件数とは別の設定である。
 有効観測が32件未満なら空間充填maximin、32件以上なら制約付き
 \code{qLogNEHVI}で候補を提案する。学習点上限384、候補pool 2048、Monte Carlo sample 64が
 現在の設定である。次に投入するcase、失敗後の再試行、次batchへ進む時点、計算予算と
@@ -202,7 +167,7 @@ equation緩和0.7、初期値は$k=10^{-4}$、$\omega=1$である。
 
 \subsection{粒子追跡と有限半径のさえぎり}
 
-\code{vendor/aerosolDynamicsFoam}の\code{basicKinematicCloud}による、一方向連成の
+外部に導入した互換粒子solverの\code{basicKinematicCloud}による、一方向連成の
 Lagrangian追跡を用いる。現在の力モデルは\code{sphereDrag}で、搬送流速度を
 \code{cellPoint}補間する。粒径は0.1, 0.2, 0.3, 0.5, 0.8, 1, 2, 3, 5, 7\,$\mu$m、
 各bin 100位置で合計1000 parcelである。
@@ -262,7 +227,7 @@ build/loadと、serialでの強制1000接触イベントの記録・除去を確
 \begin{verbatim}
 python3 -m unittest discover -s tests -v
 \end{verbatim}
-ソースの回帰テストと設定診断は、実solver・並列実行・物理モデルの妥当性の検証を代替しない。
+ソースの回帰テストは、実solver・並列実行・物理モデルの妥当性の検証を代替しない。
 本計算前には次を確認する。
 
 \begin{enumerate}
@@ -275,7 +240,7 @@ python3 -m unittest discover -s tests -v
  \item 有限半径法で初期観測を新たに取得し、方法・設定・ソースrevisionを記録してBOへ進む。
 \end{enumerate}
 
-手動版と自動版の同時運用では、出力先を分離したうえで同じSlurm資源の総使用量も確認する。
+複数のcampaignを実行する場合は、出力先を分離し、同じSlurm資源の総使用量も確認する。
 新しい調査は独立した重複報告を増やさず、本書に条件・結論・根拠となるcaseを追記する。
 
 \section{ファイルの役割}
@@ -287,11 +252,8 @@ python3 -m unittest discover -s tests -v
 \midrule
 \code{bo\_loop.py}, \code{mobo.py} & 手動操作、候補生成、観測評価、多目的BO。 \\
 \code{bo\_config.json} & 共通の計算条件とcampaign設定。 \\
-\code{site.env.example} & 利用者固有設定の雛形。\code{site.env}はGit管理外。 \\
 \code{base/} & structuredメッシュとCFDテンプレート。 \\
 \code{baseparticle/} & 粒子追跡、有限半径接触、集計のテンプレート。 \\
-\code{vendor/} & 粒子solverのbuild用ソースとライセンス。 \\
-\code{tools/} & 設定診断、solver buildなどの補助。 \\
 \code{tests/} & 軽量なソース回帰テスト。 \\
 \code{reports/} & 本書のTeX/PDF正本。 \\
 \code{campaigns/} & 実行時のcase・ログ・観測。Git管理外。 \\
@@ -299,7 +261,6 @@ python3 -m unittest discover -s tests -v
 \end{tabularx}
 \end{center}
 
-常駐dispatcher、複数ホスト設定、旧資料と\code{archive/}は自動版ブランチで参照する。
-大容量の生成case、個人設定、LaTeX中間生成物はGitHubへ登録しない。
+大容量の生成case、利用者が用意した実行環境、LaTeX中間生成物はGitHubへ登録しない。
 
 \end{document}

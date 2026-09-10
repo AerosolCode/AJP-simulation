@@ -1,116 +1,124 @@
 # AJP-simulation — BOの実行手順
 
-初期候補の生成 → CFD → 粒子計算 → 結果回収 → 次候補の生成、の順に実行します。以下のコマンドはすべてclone直下で実行してください。
+環境は利用者が準備済みであることを前提に、初期条件を生成し、CFD・粒子計算・結果回収・次候補生成を一段ずつ実行します。以下はすべてリポジトリ直下で実行します。
 
-## 1. 初回の環境設定
+## 条件数と世代の数え方
 
-自分のSSHユーザーで計算用クラスタへログインし、作業用ディレクトリにcloneします。OpenFOAMとSlurmはクラスタに導入済みであることが前提です。
+**現在の既定値は「初期32条件、追加8条件」で、1世代32条件に固定されてはいません。** このREADMEでは、初期128条件を評価した後、1世代32条件ずつ追加する例を示します。件数は毎回コマンドで明示し、既定値は変更していません。
+
+| 項目 | 件数の指定箇所 | 現在の既定値 | この手順での指定 |
+| --- | --- | --- | --- |
+| 初期条件数 | `init --initial-batch` | 32 | 128 |
+| 1回に追加する条件数 | `suggest --batch-size` | 8 | 32 |
+| BOモデルを使い始める有効観測数 | `bo_config.json` の `bo.gp_min_points` | 32 | 変更しない |
+| BO内部の獲得関数の分割評価数 | `bo.acq_batch_size` | 128 | 変更しない。生成条件数ではない |
+
+`bo_candidates.csv` の `generation` は初期生成が0、その後は `suggest` を1回実行するごとに1増えます。「世代」は候補生成のまとまりであり、同時に実行するジョブ数ではありません。
+
+## 1. 計算を始める前に
+
+利用するPythonでNumPy・Gmshと [requirements-mobo.txt](requirements-mobo.txt) の依存パッケージを使えるようにし、OpenFOAM・Slurm・MPI・互換性のある粒子solverを準備してください。環境設定ファイルの作成や読み込みは不要です。ジョブは投入元の環境を引き継ぐので、計算ノードでも同じPATH・ライブラリ・作業ディレクトリを利用できる状態にします。
+
+粒子solver本体は同梱していません。有限半径のさえぎりライブラリは残しているため、使用するsolverと同じOpenFOAM環境で、別途build済みのsolverソースを指定して作成します。
 
 ```bash
-git clone --branch main \
-  git@github.com:AerosolCode/AJP-simulation.git AJP-manual
-cd AJP-manual
-
-# site.envの作成は初回だけ。各パスを自分の環境に合わせて編集
-cp site.env.example site.env
-${EDITOR:-vi} site.env
-source ./site.env
-"$AJP_PYTHON_BIN" tools/check_site_config.py
+# /absolute/path/to/aerosolDynamicsFoam は手元のsolverソースの絶対パスへ置換
+bash baseparticle/build_custom.sh /absolute/path/to/aerosolDynamicsFoam
 ```
 
-| 設定 | 指定するもの |
-| --- | --- |
-| `AJP_PYTHON_BIN` | NumPy・Gmshを使えるPython。計算ノードでも利用できる絶対パスを推奨 |
-| `AJP_OPENFOAM_BASHRC` | 使用するOpenFOAMの `etc/bashrc` |
-| `AJP_PARTICLE_SOLVER` | 粒子solverの実行ファイル。空ならOpenFOAM環境のPATHから探索 |
-| `AJP_SLURM_NODELIST` | 投入先node。空ならSlurmに選択を任せる |
-| `AJP_WORKER_ENV` | 通常は空のまま |
+外部solverには、`liboneWayIntermediate` と必要なヘッダを備え、`-particleParallel`・`-nParticleShards` とwedge反射に対応した改修版が必要であり、標準solverへそのまま置き換えることはできません。生成した `baseparticle/custom/finiteRadiusDeposition/lib/libfiniteRadiusDeposition.so` は粒子ケースへコピーされます。
 
-`site.env` はGit管理外です。ユーザーや環境が変わったら、このファイルをその人の設定で作成してください。Slurmで選ばれる全ノードから、clone・Python・OpenFOAM・solverを利用できる構成にします。
+共有する計算条件は [bo_config.json](bo_config.json) の形状範囲・目的関数・制約・乱数seedで指定します。CFDと粒子計算のSlurm資源指定は、それぞれ `base/run.sh` と `baseparticle/loopaerosolDynamics.sh` の `#SBATCH` 行を確認してください。条件やテンプレートは初期生成前に確認し、途中で評価条件を変えないでください。
 
-必要なPythonパッケージ、粒子solver、壁面さえぎりライブラリを準備します。buildは計算時と同じOpenFOAM・利用者環境で実行してください。
+## 2. 初期128条件を生成する
+
+新しい計算を始めるときに、一度だけ実行します。
 
 ```bash
-"$AJP_PYTHON_BIN" -m pip install numpy gmsh
-"$AJP_PYTHON_BIN" -m pip install -r requirements-mobo.txt
-bash tools/build_solver.sh "$AJP_OPENFOAM_BASHRC" \
-  "$PWD/vendor/aerosolDynamicsFoam"
-"$AJP_PYTHON_BIN" tools/check_site_config.py --local-tools
+python3 bo_loop.py --config bo_config.json init --initial-batch 128
+python3 bo_loop.py --config bo_config.json status
 ```
 
-新しいターミナルや再ログイン後は、clone直下で設定を読み直します。
+初期条件は、`bo_config.json` の範囲と形状制約を満たす候補から、条件間の距離を広げるmaximin法で選びます。この時点ではCFD・粒子計算は実行しません。
 
-```bash
-source ./site.env
+既定の保存先は次のとおりです。初期128条件は `case_0000`〜`case_0127`、`generation=0` になります。
+
+```text
+campaigns/manual_structured_finite_radius/
+├── bo_config_snapshot.json  # 開始時の設定の控え
+├── bo_candidates.csv        # 候補の条件・世代・生成手法
+├── bo_observations.csv      # collect後に作成される評価結果
+├── case_0000/
+│   ├── params.dat          # CFDへ渡す具体的な形状・流量条件
+│   ├── run.sh              # CFD実行スクリプト
+│   └── baseparticle/       # 粒子投入時に準備されるケース
+└── case_0001/ ... case_0127/
 ```
 
-## 2. 初期候補を生成する
+初期生成をやり直す場合は、既存結果を消さずに別の保存先を指定します。例えば `--config bo_config.json --workdir campaigns/run02 init --initial-batch 128` とし、その計算に関する以後の全コマンドにも同じ `--workdir campaigns/run02` を付けます。実行時の設定は `--config` で指定したJSONを読むため、開始時の控えがあっても元のJSONを途中で書き換えないでください。
 
-形状範囲・目的関数などの計算条件は [bo_config.json](bo_config.json) で確認・編集します。まず初期候補32件を生成します。`init` は新しい計算を始めるときに一度だけ実行します。
+## 3. CFDを実行する
 
-```bash
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json init --initial-batch 32
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
-```
-
-既定の出力先は `campaigns/manual_structured_finite_radius/` です。この中の `bo_candidates.csv` で候補を確認できます。`init` と `suggest` は候補を生成するだけで、計算ジョブは投入しません。
-
-## 3. 選んだケースのCFDを投入する
-
-以下は `case_0000` と `case_0001` を計算する例です。`--cases` の後を実際に計算したいケース名に置き換えてください。まず `--dry-run` で投入内容を確認し、問題なければ投入します。
+以下は最初の2条件を選ぶ例です。`--cases` の後を実際に計算したいケース名へ置き換えます。まず `--dry-run` で確認してから投入してください。
 
 ```bash
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+python3 bo_loop.py --config bo_config.json \
   submit-cfd --cases case_0000 case_0001 --dry-run
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+python3 bo_loop.py --config bo_config.json \
   submit-cfd --cases case_0000 case_0001
-```
 
-ジョブの終了を待ち、進捗と各ケースのログでCFDの成功を確認します。
-
-```bash
 squeue -u "$USER"
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+python3 bo_loop.py --config bo_config.json status
 ```
 
-## 4. CFDが成功したケースの粒子計算を投入する
+各ケースの `log.potentialFoam`・`log.simpleFoam` と `CFD_DONE` を確認し、CFDの成功を待って次へ進みます。structuredメッシュを使い、残差停止した場合も最新のCFD時刻の流れ場を粒子計算へ渡します。
 
-CFDの成功を確認したケースを指定します。残差停止した場合も、CFDの最新時刻の流れ場を使います。
+## 4. 粒子計算を実行する
+
+CFDが成功したケースを指定します。この操作で各ケース内に `baseparticle/` を準備し、粒子計算を投入します。
 
 ```bash
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+python3 bo_loop.py --config bo_config.json \
   submit-particles --cases case_0000 case_0001 --dry-run
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+python3 bo_loop.py --config bo_config.json \
   submit-particles --cases case_0000 case_0001
 
 squeue -u "$USER"
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+python3 bo_loop.py --config bo_config.json status
 ```
+
+各ケースの `baseparticle/` 内のログと `PARTICLE_DONE` を確認し、終了を待ちます。
 
 ## 5. 結果を回収する
 
-粒子計算の終了後、結果を観測CSVへ反映します。
-
 ```bash
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json \
+python3 bo_loop.py --config bo_config.json \
   collect --cases case_0000 case_0001
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json status
+python3 bo_loop.py --config bo_config.json status
 ```
 
-結果は出力先の `bo_observations.csv` に保存されます。手順3〜5を繰り返し、残りの初期候補も評価します。
+`bo_observations.csv` に目的関数・制約などの評価結果が追記されます。回収済みケースは再度追加されません。手順3〜5を繰り返し、初期128条件の評価を終えます。
 
-## 6. 次の候補を生成して繰り返す
+投入・回収コマンドの `--cases` を省略すると、全候補のうちその段階の対象になるケースを処理します。投入では多数のジョブが送られ得るため、クラスタの利用制限に合わせてケースを選んでください。
 
-回収した結果を確認し、次の8件を生成します。
+## 6. BOで次の32条件を生成する
+
+初期評価を回収したら、次を実行します。
 
 ```bash
-"$AJP_PYTHON_BIN" bo_loop.py --config bo_config.json suggest --batch-size 8
+python3 bo_loop.py --config bo_config.json suggest --batch-size 32
 ```
 
-有効観測が32件未満なら空間充填maximin、32件以上なら制約付き多目的BO（qLogNEHVI）で候補を提案します。`bo_candidates.csv` で新しいケース名を確認し、そのケースについて手順3〜5を実行します。以後は手順6→3→4→5を必要な回数だけ繰り返します。`init` をやり直す必要はありません。
+上記の初期128条件の続きなら、`case_0128`〜`case_0159` が `generation=1` として追加されます。生成した32条件について手順3〜5を実行し、回収が終わってから再び `suggest --batch-size 32` を実行します。次は `generation=2` の32条件です。`init` は再実行しません。
+
+`suggest` はその時点までに回収した有効観測から制約付き多目的BO（qLogNEHVI）で候補を提案します。有効観測が32件未満ならmaximin法を使います。依存パッケージの不足やモデル計算の失敗時もmaximinへ切り替わるため、標準エラーと `bo_candidates.csv` の `method` を確認してください。`maximin_mobo_fallback` はBOモデルによる提案ではありません。
+
+この手順では「1世代の計算・回収を終えてから次世代を生成する」運用にします。`suggest` 自体は未完了ケースがあっても実行できるため、終了待ちや次世代へ進む判断は利用者が行います。候補生成だけを繰り返しても、計算・回収をしなければBOの学習データは増えません。
 
 ## 計算に失敗したとき
 
-`status` が `cfd_failed` または `particle_failed` を示したらログを確認します。再試行する場合は、回収前に原因を修正して該当段階の `*_FAILED` 印だけを取り除いてから再投入します。失敗として評価に残す場合は `collect` します。強制終了では失敗印が残らない場合もあるため、Slurmの `sacct` でも確認してください。`squeue` を確認できないときは重複投入を避けるため投入を停止します。
+`status` に `cfd_failed` または `particle_failed` が出たら、該当ケースのログを確認します。再試行する場合は、ジョブが終了していることを確認し、回収前に原因を修正して該当段階の `CFD_FAILED` または `PARTICLE_FAILED` 印だけを取り除いてから再投入します。失敗として記録する場合は `collect` します。
+
+強制終了では失敗印が残らない場合もあるため、Slurmの `sacct` でも確認してください。キューを確認できないときは、重複投入を防ぐため投入コマンドは停止します。
 
 Licensed under [GNU GPL v3.0](LICENSE).

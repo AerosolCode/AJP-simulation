@@ -58,9 +58,7 @@ class ManualWorkflowTests(unittest.TestCase):
         (particle_dir / "PARTICLE_DONE").touch()
 
     def test_offline_init_and_suggest_only_prepare_cases(self):
-        with mock.patch.dict(
-            os.environ, {"AJP_SITE_ENV": str(Path(self.temporary.name) / "absent.env")}
-        ), mock.patch.object(bo_loop, "run_sbatch") as submit:
+        with mock.patch.object(bo_loop, "run_sbatch") as submit:
             first = self.prepare()
             self.command("suggest", "--batch-size", "1")
             submit.assert_not_called()
@@ -70,6 +68,32 @@ class ManualWorkflowTests(unittest.TestCase):
         self.assertEqual(rows[-1]["case"], "case_0002")
         self.assertTrue((self.workdir / "case_0002" / "params.dat").is_file())
         self.assertEqual(bo_loop.read_csv_rows(bo_loop.observations_path(self.workdir)), [])
+
+    def test_cli_does_not_load_environment_files(self):
+        unused_env = Path(self.temporary.name) / "unused.env"
+        unused_env.write_text("this is not a valid environment setting\n")
+        with mock.patch.dict(os.environ, {"AJP_SITE_ENV": str(unused_env)}):
+            rows = self.prepare()
+        self.assertEqual(len(rows), 2)
+
+    def test_default_counts_and_explicit_128_then_32_generation(self):
+        parser = bo_loop.build_parser()
+        self.assertEqual(parser.parse_args(["init"]).initial_batch, 32)
+        self.assertEqual(parser.parse_args(["suggest"]).batch_size, 8)
+        self.config["bo"]["candidate_pool"] = 256
+        self.config_path.write_text(json.dumps(self.config))
+        with mock.patch.object(bo_loop, "run_sbatch") as submit:
+            self.command("init", "--initial-batch", "128")
+            self.command("suggest", "--batch-size", "32")
+            submit.assert_not_called()
+        rows = bo_loop.read_csv_rows(bo_loop.candidates_path(self.workdir))
+        self.assertEqual(len(rows), 160)
+        self.assertEqual([row["generation"] for row in rows[:128]], ["0"] * 128)
+        self.assertEqual([row["generation"] for row in rows[128:]], ["1"] * 32)
+        self.assertEqual(rows[0]["case"], "case_0000")
+        self.assertEqual(rows[-1]["case"], "case_0159")
+        # No observations were collected, so neither batch can use a fitted GP.
+        self.assertTrue(all(row["method"] == "maximin_initial_mobo" for row in rows))
 
     def test_cli_rejects_automatic_execution_modes(self):
         parser = bo_loop.build_parser()

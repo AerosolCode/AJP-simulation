@@ -60,7 +60,7 @@ class CfdCompletionTests(unittest.TestCase):
         self.assertEqual(latest_cfd_time(self.case_dir), "250")
         self.assertTrue(bo_loop.cfd_completed(self.case_dir))
 
-    def test_openfoam_source_failure_marks_stage_failed(self):
+    def test_missing_inherited_python_marks_stage_failed_without_loading_environment_files(self):
         for script, stage in (
             (ROOT / "base/run.sh", "CFD"),
             (ROOT / "baseparticle/loopaerosolDynamics.sh", "PARTICLE"),
@@ -72,17 +72,23 @@ class CfdCompletionTests(unittest.TestCase):
                 failed = case_dir / (stage + "_FAILED")
                 done.touch()
                 environment = dict(os.environ)
+                environment.pop("HOME", None)
+                ignored_file = case_dir / "unused-environment.sh"
+                ignored_file.write_text("touch sourced-environment\n")
                 environment.update({
-                    "AJP_OPENFOAM_BASHRC": str(case_dir / "missing-openfoam-bashrc"),
-                    "AJP_WORKER_ENV": "",
+                    "AJP_PYTHON_BIN": str(case_dir / "missing-python"),
+                    "AJP_OPENFOAM_BASHRC": str(ignored_file),
+                    "AJP_WORKER_ENV": str(ignored_file),
                 })
                 result = subprocess.run(
                     ["bash", str(script)], cwd=case_dir, env=environment,
                     capture_output=True, text=True, timeout=5,
                 )
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 127, result.stdout + result.stderr)
+                self.assertIn("required command unavailable", result.stderr)
                 self.assertTrue(failed.is_file(), result.stdout + result.stderr)
                 self.assertFalse(done.exists(), result.stdout + result.stderr)
+                self.assertFalse((case_dir / "sourced-environment").exists())
 
 
 if __name__ == "__main__":

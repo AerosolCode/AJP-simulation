@@ -19,23 +19,15 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 
 echo "[particle] script start"
-WORKER_ENV=${AJP_WORKER_ENV-}
-if [ -r "$WORKER_ENV" ]; then
-    # Host-specific OpenFOAM, solver, and Python/Gmsh locations.
-    source "$WORKER_ENV"
-    echo "[particle] worker environment=$WORKER_ENV"
-fi
-set +e
-set +u
-set +o pipefail
-source "${AJP_OPENFOAM_BASHRC:-/usr/lib/openfoam/openfoam2406/etc/bashrc}"
-source_rc=$?
-set -euo pipefail
-if [ "$source_rc" -ne 0 ]; then
-    echo "[particle] failed to source OpenFOAM bashrc (rc=$source_rc)"
-    exit "$source_rc"
-fi
-echo "[particle] OpenFOAM sourced"
+# The submitting shell supplies OpenFOAM, the solver, and Python through Slurm.
+PYTHON_BIN=${AJP_PYTHON_BIN:-python3}
+for required_command in "$PYTHON_BIN" foamFormatConvert checkMesh postProcess; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+        echo "[particle] required command unavailable: $required_command. Prepare the environment before submitting the job." >&2
+        exit 127
+    fi
+done
+echo "[particle] using inherited OpenFOAM environment: ${WM_PROJECT_DIR:-PATH}"
 
 CASE_NAME=$(basename "$(dirname "$PWD")")
 CASE_NUM=$(echo "$CASE_NAME" | sed 's/case_//')
@@ -61,8 +53,61 @@ DELTA_T=${AJP_DELTA_T:-1e-4}
 MAX_U_MAG=${AJP_MAX_U_MAG:-10000}
 LOG_TAIL_LINES=${AJP_LOG_TAIL_LINES:-400}
 KEEP_FULL_LOG=${AJP_KEEP_FULL_PARTICLE_LOG:-0}
-PYTHON_BIN=${AJP_PYTHON_BIN:-python3}
 echo "[particle] injection_points=$INJECTION_POINTS total_particles=$TOTAL_PARTICLES"
+
+SOLVER=${AJP_PARTICLE_SOLVER:-}
+if [ -z "$SOLVER" ]; then
+    if command -v aerosolDynamicsFoam >/dev/null 2>&1; then
+        SOLVER=$(command -v aerosolDynamicsFoam)
+    elif command -v aerosolEulerFoam >/dev/null 2>&1; then
+        SOLVER=$(command -v aerosolEulerFoam)
+    fi
+fi
+if [ -n "$SOLVER" ]; then
+    requested_solver=$SOLVER
+    SOLVER=$(command -v "$requested_solver" || true)
+    if [ -z "$SOLVER" ] || [ ! -x "$SOLVER" ]; then
+        echo "[particle] requested solver unavailable: $requested_solver" >&2
+        exit 127
+    fi
+fi
+LOG=${AJP_PARTICLE_LOG:-log.aerosolDynamicsFoam}
+
+NPROCS=${SLURM_NTASKS:-${AJP_PARTICLE_NPROCS:-4}}
+PARALLEL_LAUNCHER=${AJP_PARALLEL_LAUNCHER:-mpirun}
+
+WRITE_INTERVAL=$(awk -v c="$CHUNK" -v dt="$DELTA_T" 'BEGIN{printf "%d", c/dt}')
+POST_BASE_DIR="postProcessing/lagrangian"
+
+if [ -z "$SOLVER" ] || [ ! -x "$SOLVER" ]; then
+    echo "[particle] no particle solver found in PATH. Prepare aerosolDynamicsFoam or set AJP_PARTICLE_SOLVER before submission." >&2
+    exit 127
+fi
+
+echo "[particle] solver=$SOLVER"
+echo "[particle] log_tail_lines=$LOG_TAIL_LINES keep_full_log=$KEEP_FULL_LOG"
+
+if [ "$PARALLEL_LAUNCHER" = "mpirun" ]; then
+    if command -v mpirun >/dev/null 2>&1; then
+        RUN_CMD=(mpirun -np "$NPROCS")
+    elif command -v srun >/dev/null 2>&1; then
+        RUN_CMD=(srun -n "$NPROCS")
+    else
+        echo "Neither mpirun nor srun was found."
+        exit 127
+    fi
+elif [ "$PARALLEL_LAUNCHER" = "srun" ]; then
+    if ! command -v srun >/dev/null 2>&1; then
+        echo "[particle] requested launcher unavailable: srun" >&2
+        exit 127
+    fi
+    RUN_CMD=(srun -n "$NPROCS")
+else
+    echo "Unsupported AJP_PARALLEL_LAUNCHER=$PARALLEL_LAUNCHER"
+    exit 2
+fi
+
+echo "[particle] launcher=${RUN_CMD[*]}"
 
 HORIZON_TOOL=${AJP_PARTICLE_HORIZON_TOOL:-$CASE_DIR/particle_horizon.py}
 HORIZON_OUTPUT=$(
@@ -87,52 +132,6 @@ else
 fi
 echo "[particle] horizon mode=$MAX_TIME_MODE max_time=$MAX_TIME"
 echo "[particle] nominal inlet velocity=$INLET_VELOCITY_MPS m/s axial_length=$AXIAL_LENGTH_M m transit=$NOMINAL_TRANSIT_S s"
-
-SOLVER=${AJP_PARTICLE_SOLVER:-}
-if [ -n "$SOLVER" ] && [[ "$SOLVER" != */* ]]; then
-    SOLVER=$(command -v "$SOLVER" || true)
-fi
-if [ -z "$SOLVER" ]; then
-    if command -v aerosolDynamicsFoam >/dev/null 2>&1; then
-        SOLVER=$(command -v aerosolDynamicsFoam)
-    elif command -v aerosolEulerFoam >/dev/null 2>&1; then
-        SOLVER=$(command -v aerosolEulerFoam)
-    fi
-fi
-LOG=${AJP_PARTICLE_LOG:-log.aerosolDynamicsFoam}
-
-NPROCS=${SLURM_NTASKS:-${AJP_PARTICLE_NPROCS:-4}}
-PARALLEL_LAUNCHER=${AJP_PARALLEL_LAUNCHER:-mpirun}
-
-WRITE_INTERVAL=$(awk -v c="$CHUNK" -v dt="$DELTA_T" 'BEGIN{printf "%d", c/dt}')
-POST_BASE_DIR="postProcessing/lagrangian"
-
-if [ -z "$SOLVER" ] || [ ! -x "$SOLVER" ]; then
-    echo "Particle solver was not found on $(hostname)."
-    echo "Particle tracking must run on a node with aerosolDynamicsFoam installed."
-    exit 127
-fi
-
-echo "[particle] solver=$SOLVER"
-echo "[particle] log_tail_lines=$LOG_TAIL_LINES keep_full_log=$KEEP_FULL_LOG"
-
-if [ "$PARALLEL_LAUNCHER" = "mpirun" ]; then
-    if command -v mpirun >/dev/null 2>&1; then
-        RUN_CMD=(mpirun -np "$NPROCS")
-    elif command -v srun >/dev/null 2>&1; then
-        RUN_CMD=(srun -n "$NPROCS")
-    else
-        echo "Neither mpirun nor srun was found."
-        exit 127
-    fi
-elif [ "$PARALLEL_LAUNCHER" = "srun" ]; then
-    RUN_CMD=(srun -n "$NPROCS")
-else
-    echo "Unsupported AJP_PARALLEL_LAUNCHER=$PARALLEL_LAUNCHER"
-    exit 2
-fi
-
-echo "[particle] launcher=${RUN_CMD[*]}"
 
 CFD_TIME=$("$PYTHON_BIN" "$CASE_DIR/cfd_fields.py" ..)
 echo "[particle] carrier CFD time=$CFD_TIME"
